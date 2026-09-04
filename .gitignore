@@ -1,0 +1,12 @@
+# Rime deployment artifacts
+build/
+*.userdb/
+installation.yaml
+user.yaml
+weasel.custom.yaml
+
+# The n-gram model is distributed via Releases, never committed
+models/
+
+# Test scratch
+.test_import/
