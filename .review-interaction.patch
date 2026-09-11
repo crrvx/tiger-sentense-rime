@@ -1,0 +1,311 @@
+--- a/lua/tiger_sentence.lua
++++ b/lua/tiger_sentence.lua
+@@ -701,6 +701,7 @@
+ 
+ local function load_mobile(path)
+     local file = assert(io.open(path, "rb"), "cannot open n-gram: " .. path)
++    local function read_model()
+     local header = file:read(MOBILE_HEADER_SIZE)
+     assert(header and #header == MOBILE_HEADER_SIZE, "truncated mobile n-gram: " .. path)
+     assert(header:sub(1, 8) == "TCSKNM02", "not a TCSKNM02 model: " .. path)
+@@ -930,8 +931,17 @@
+         cache_limit_bytes = MOBILE_CACHE_BYTES,
+         logp = logp,
+         has_observed_bigram = has_observed_bigram,
+-        close = function() file:close() end
++        close = function()
++            if file then file:close(); file = nil end
++        end
+     }
++    end
++    local ok, model = pcall(read_model)
++    if not ok then
++        if file then file:close() end
++        error(model, 0)
++    end
++    return model
+ end
+ 
+ function kn_reader.load(path)
+@@ -1145,6 +1155,24 @@
+ local EOS = kn_reader.EOS
+ local kn_model = false
+ local kn_load_error = nil
++local model_generation = 0
++local model_failure = {} -- Only model-operation failures may trigger decode retry.
++
++local function call_model(model, operation, ...)
++    local ok, value = pcall(model[operation], ...)
++    if ok and (operation ~= "logp" or
++        (type(value) == "number" and value == value and math.abs(value) < math.huge)) then
++        return value
++    end
++    model_failure.reason = ok and "non-finite model probability" or tostring(value)
++    error(model_failure, 0)
++end
++
++local function close_model()
++    local previous = kn_model
++    kn_model = nil
++    if previous and previous.close then pcall(previous.close) end
++end
+ -- Test/frontend hook: force-disable the n-gram model so the no-model
+ -- fallback ordering can be exercised deterministically.
+ local model_disabled = false
+@@ -1216,7 +1244,8 @@
+         last_auto_commit_raw_length = 0,
+         suspended = false,
+         empty_code_pending = nil,
+-        continuation_after_auto_commit = false
++        continuation_after_auto_commit = false,
++        model_generation = model_generation
+     }
+ end
+ 
+@@ -1278,6 +1307,15 @@
+ 
+ local function active_lock(state)
+     return state.locks and state.locks[#state.locks]
++end
++
++local function synchronize_model_state(state)
++    if state.model_generation == model_generation then return false end
++    state.model_generation = model_generation
++    state.trackers = {}
++    state.last_seen_raw = ""
++    state.empty_code_pending = nil
++    return true
+ end
+ 
+ local function sentence_state(context, env)
+@@ -1296,6 +1334,7 @@
+             set_property_if_changed(context, state_keys.committed_text, "")
+         end
+     end
++    synchronize_model_state(transient)
+     transient.committed_text = committed_text
+     transient.committed_raw = committed_raw
+     transient.locks = read_locks(context)
+@@ -1385,7 +1424,7 @@
+     local model = ensure_kn()
+     local value = 0
+     if model then
+-        value = model.logp(prev2, prev1, target)
++        value = call_model(model, "logp", prev2, prev1, target)
+     end
+     local old_key = logp_cache_keys[logp_cache_next]
+     if old_key then
+@@ -1488,7 +1527,7 @@
+     end
+     local model = ensure_kn()
+     local value = model and model.has_observed_bigram and
+-        model.has_observed_bigram(previous, target) or false
++        call_model(model, "has_observed_bigram", previous, target) or false
+     local old_key = observed_cache_keys[observed_cache_next]
+     if old_key then
+         observed_cache[old_key] = nil
+@@ -2601,6 +2640,29 @@
+     return result
+ end
+ 
++-- A model read can fail after push_input has already changed the composition.
++-- Retry the entire decode with one coherent no-model scoring policy, never just
++-- substitute zero for a failed probability in a partially scored lattice.
++-- Non-model/programming errors still propagate normally.
++local function guarded_decode(operation)
++    return function(...)
++        local ok, result = pcall(operation, ...)
++        if ok then return result end
++        if result ~= model_failure then error(result, 0) end
++        kn_load_error = "runtime n-gram failure: " .. model_failure.reason
++        close_model()
++        model_generation = model_generation + 1
++        clear_model_dependent_caches()
++        if log and type(log.error) == "function" then
++            pcall(log.error, "tiger_sentence: " .. kn_load_error .. "; using no-model fallback")
++        end
++        return operation(...)
++    end
++end
++
++decode = guarded_decode(decode)
++decode_full = guarded_decode(decode_full)
++
+ local function trim_segmented_after_raw_prefix(segmented, raw_prefix_length)
+     if not segmented or segmented == "" or raw_prefix_length <= 0 then
+         return segmented or ""
+@@ -2822,7 +2884,11 @@
+     local segment = composition:back()
+     local menu = segment and segment.menu
+     if not menu then return false end
+-    local count = menu:candidate_count()
++    -- candidate_count() is only the materialized prefix of a lazy Rime menu.
++    -- Our translator emits at most candidate_limit items: prepare that bounded
++    -- list before deciding where cyclic navigation should wrap.
++    local count = type(menu.prepare) == "function"
++        and menu:prepare(candidate_limit) or menu:candidate_count()
+     if not count or count <= 0 then return false end
+     local selected = segment.selected_index or 0
+     local target = (selected + step) % count
+@@ -2882,6 +2948,32 @@
+     if value ~= "" then
+         context:push_input(value)
+     end
++end
++
++-- Rime uses a byte offset in the raw input, not an index in displayed text.
++-- Old frontend/test contexts without caret_pos retain end-append behaviour.
++local function input_caret(context)
++    local length = #(context.input or "")
++    local caret = context.caret_pos
++    if type(caret) ~= "number" then return length end
++    return math.max(0, math.min(length, math.floor(caret)))
++end
++
++local function invalidate_edit_state(context, state, env, first_changed, full_length)
++    state.tab_pending = false
++    state.trackers = {}
++    state.last_seen_raw = ""
++    state.empty_code_pending = nil
++    -- Editing a locked but uncommitted range invalidates that lock and every
++    -- subsequent one. Reaching its boundary by deletion also unlocks it.
++    -- Never discard a lock for text already committed to the application.
++    while active_lock(state) and #active_lock(state).raw > #state.committed_raw and
++        (first_changed < #active_lock(state).raw or
++         full_length <= #active_lock(state).raw) do
++        table.remove(state.locks)
++    end
++    save_sentence_state(context, state, env)
++    reset_decode_cache()
+ end
+ 
+ local function get_min_retained_raw_length(env)
+@@ -2932,9 +3024,27 @@
+         save_transient_state(context, state, env)
+         return false
+     end
++    if synchronize_model_state(state) then
++        save_transient_state(context, state, env)
++        return false
++    end
++    local generation = model_generation
+     local pending = state.empty_code_pending or
+         capture_empty_code_candidate(full_before, state.committed_text, active_lock(state))
+-    local full_raw = full_before .. appended_letter
++    if generation ~= model_generation then
++        synchronize_model_state(state)
++        save_transient_state(context, state, env)
++        return false
++    end
++    local full_raw = state.committed_raw .. (context.input or "")
++    -- push_input inserts at the caret. Even callers other than processor must
++    -- not turn a middle insertion (or a reentrant edit) into an imagined append.
++    if full_raw ~= full_before .. appended_letter or
++        input_caret(context) ~= #(context.input or "") then
++        state.empty_code_pending = nil
++        save_transient_state(context, state, env)
++        return false
++    end
+     state.empty_code_pending = pending
+ 
+     if not pending then
+@@ -3058,7 +3168,8 @@
+     local state = sentence_state(context, env)
+     local live_raw = context.input or ""
+ 
+-    if not context:get_option("tiger_sentence_early_commit") or state.suspended then
++    if input_caret(context) ~= #live_raw or
++        not context:get_option("tiger_sentence_early_commit") or state.suspended then
+         reset_early_evidence(state)
+         save_transient_state(context, state, env)
+         return
+@@ -3072,7 +3183,13 @@
+         return
+     end
+ 
++    local generation = model_generation
+     local decoded = decode(full_raw, true, state.committed_text, active_lock(state))
++    if generation ~= model_generation then
++        synchronize_model_state(state)
++        save_transient_state(context, state, env)
++        return
++    end
+     local early_commit_evidence = decoded.early_commit_evidence or {}
+     if early_commit_evidence.confidence_truncated then
+         reset_early_evidence(state)
+@@ -3229,7 +3346,17 @@
+             return 1
+         end
+         local is_letter = ch:match("^[a-z]$") ~= nil
+-        local full_before = state.committed_raw .. (context.input or "")
++        local live_before = context.input or ""
++        local caret = input_caret(context)
++        local full_before = state.committed_raw .. live_before
++        if caret ~= #live_before then
++            invalidate_edit_state(context, state, env,
++                #state.committed_raw + caret, #full_before + #ch)
++            -- Keep Rime's real insertion/caret semantics. This edit is not
++            -- evidence for either append-only auto-commit path or a Tab lock.
++            context:push_input(ch)
++            return 1
++        end
+         local confirm = state.tab_pending and is_letter
+         state.tab_pending = false
+         if confirm then
+@@ -3305,20 +3432,40 @@
+         state.tab_pending = false
+         reset_early_evidence(state)
+         state.empty_code_pending = nil
+-        if repr == "BackSpace" and active_lock(state) then
+-            local remaining = (context.input or ""):sub(1, -2)
+-            local length = #state.committed_raw + #remaining
+-            while active_lock(state) and #active_lock(state).raw > #state.committed_raw and
+-                length <= #active_lock(state).raw do table.remove(state.locks) end
++        if active_lock(state) then
++            local raw = context.input or ""
++            local caret = input_caret(context)
++            local first = repr == "BackSpace" and caret - 1 or caret
++            if first < 0 or first >= #raw then
++                save_transient_state(context, state, env)
++                return 2
++            end
++            local remaining = raw:sub(1, first) .. raw:sub(first + 2)
++            invalidate_edit_state(context, state, env,
++                #state.committed_raw + first, #state.committed_raw + #remaining)
+             if remaining == "" then
+                 context:clear()
+                 reset_sentence_state(context, env)
+             else
+-                save_sentence_state(context, state, env)
+-                restore_composition_input(context, remaining)
++                local edit = repr == "BackSpace" and context.pop_input or context.delete_input
++                if type(edit) == "function" then
++                    edit(context, 1)
++                else
++                    restore_composition_input(context, remaining)
++                    if type(context.caret_pos) == "number" then context.caret_pos = first end
++                end
+             end
+             return 1
+         end
++        save_transient_state(context, state, env)
++        return 2
++    end
++    if repr == "Left" or repr == "Right" or repr == "Home" or repr == "End" then
++        -- Let navigator move the caret; old append evidence and a pending Tab
++        -- confirmation do not survive manual cursor navigation.
++        state.tab_pending = false
++        reset_early_evidence(state)
++        state.empty_code_pending = nil
+         save_transient_state(context, state, env)
+         return 2
+     end
+@@ -3449,6 +3596,8 @@
+         return
+     end
+     model_disabled = disabled
++    close_model()
++    model_generation = model_generation + 1
+     kn_model = false
+     kn_load_error = nil
+     clear_model_dependent_caches()
