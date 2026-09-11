@@ -40,9 +40,15 @@ int main(int argc,char**argv){
         locked();api->set_caret_pos(session,2);key(0xff08);
         check(input()=="acd" && api->get_caret_pos(session)==1 && committed.empty(),"Real locked backspace ignored caret");
         check(property("tiger_sentence_locks").empty(),"Real backspace retained invalid lock");
-        locked();api->set_caret_pos(session,2);key(0xffff);
-        check(input()=="abd" && api->get_caret_pos(session)==2 && committed.empty(),"Real locked Delete ignored caret");
-        check(property("tiger_sentence_locks").empty(),"Real Delete retained invalid lock");
+        // locked() confirms only "ab", not the subsequently typed "cd".
+        // Delete inside "ab" must unlock; deleting in its suffix must preserve it.
+        locked();api->set_caret_pos(session,1);key(0xffff);
+        check(input()=="acd" && api->get_caret_pos(session)==1 && committed.empty(),"Real locked Delete ignored caret");
+        check(property("tiger_sentence_locks").empty(),"Real Delete retained intersected lock");
+        locked();const auto prefixLock=property("tiger_sentence_locks");
+        api->set_caret_pos(session,2);key(0xffff);
+        check(input()=="abd" && api->get_caret_pos(session)==2 && committed.empty(),"Real suffix Delete ignored caret");
+        check(property("tiger_sentence_locks")==prefixLock,"Real suffix Delete discarded unaffected lock");
         reset(false);type("ja");check(selection()==0,"Unexpected initial selection");
         for(int i=1;i<=20;++i){key(0xff09);check(selection()==i%20,"Real Tab wrapped at prepared page instead of true end");check(committed.empty(),"Tab committed a candidate");}
         key(0xff09,1);check(selection()==19 && committed.empty(),"Real Shift+Tab missed last candidate");
