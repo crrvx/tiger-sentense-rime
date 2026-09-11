@@ -54,7 +54,7 @@ end
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--exe", required=True)
-    parser.add_argument("--shared-data", default="/usr/share/rime-data")
+    parser.add_argument("--shared-data", help="Optional Rime shared data; defaults to a minimal isolated preset")
     parser.add_argument("--plugin", required=True)
     args = parser.parse_args()
     with temporary_tree() as root:
@@ -66,7 +66,13 @@ def main():
         (root / "tiger_sentence.custom.yaml").write_text("patch:\n  tiger_sentence/high_freq_limit: 0\n", encoding="utf-8")
         with (root / "rime.lua").open("a", encoding="utf-8") as file:
             file.write(FAULT_ADAPTER)
-        subprocess.run([str(Path(args.exe).resolve()), str(root), args.shared_data,
+        shared = Path(args.shared_data).resolve() if args.shared_data else root / "_shared"
+        if not args.shared_data:
+            shared.mkdir()
+            (shared / "default.yaml").write_text(
+                'config_version: "1.0"\nschema_list:\n  - schema: tiger_sentence\n'
+                'menu:\n  page_size: 5\nrecognizer:\n  patterns: {}\n', encoding="utf-8")
+        subprocess.run([str(Path(args.exe).resolve()), str(root), str(shared),
                         str(Path(args.plugin).resolve())], check=True, timeout=90)
 
 

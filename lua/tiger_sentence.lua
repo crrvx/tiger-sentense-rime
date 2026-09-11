@@ -2004,6 +2004,11 @@ local function expand_range(raw, states, from_pos, length, minimum_consumed_end)
                             local selected_candidates = eligible_candidates(
                                 candidates, selected_rank, whole_input_edge,
                                 active_allow_duplicate_single)
+                            -- A descendant cannot recover probability mass
+                            -- already discarded at an earlier lattice boundary.
+                            if #selected_candidates > 0 and current._truncated then
+                                states[consumed_end]._truncated = true
+                            end
                             for c = 1, #current do
                                 local item = current[c]
                                 for k = 1, #selected_candidates do
@@ -2397,6 +2402,9 @@ local function emit(raw, states, length, include_early_commit, required_text_pre
     end
     local result = select_exact_top(all_candidates, candidate_limit, better)
     result._completed_truncated = completed._truncated or false
+    -- Display Top-K is not the probability pool. Retain the scored beam for
+    -- evidence upgrades and empty-code confidence, including off-menu outputs.
+    result._confidence_candidates = all_candidates
     for i = 1, #result do
         result[i]._raw = raw
         setmetatable(result[i], candidate_display_meta)
@@ -2412,14 +2420,11 @@ local function emit(raw, states, length, include_early_commit, required_text_pre
         confidence_truncated = completed._truncated or false
     }
     if include_early_commit then
-        -- The full-code path only needs the already-selected top candidates
-        -- (`result`); widening to the whole beam (`all_candidates`) only
-        -- matters once an incomplete tail is merged in, so defer that cost
-        -- to build_early_commit_evidence instead of paying it every key.
+        -- Menu truncation must not inflate prefix/boundary confidence.
         result.early_commit_evidence = build_early_commit_evidence(
             raw,
             states,
-            result,
+            all_candidates,
             completed._truncated or false,
             required_text_prefix or "")
     end
@@ -2587,7 +2592,7 @@ local function decode(raw_code, include_early_commit, required_text_prefix, lock
         local result = decode_cache.result
         if result then
             result.early_commit_evidence = build_early_commit_evidence(
-                raw, old_states, result,
+                raw, old_states, result._confidence_candidates,
                 result._completed_truncated,
                 required_text_prefix)
             decode_cache.includes_early_commit = true
@@ -2840,22 +2845,24 @@ local function capture_empty_code_candidate(full_before, committed_text, locked)
         return nil
     end
     local visible_top = decoded[1]
-    local eligible = {}
     local restrict = not has_selection_suffix(full_before)
-    for i = 1, #decoded do
-        -- Include duplicate singles in uniqueness and confidence, even when
-        -- the current whole-input winner is still ordered by lexicon rank.
-        local previous = decoded[i].path and decoded[i].path.previous
-        if not restrict or (decoded[i].max_rank or 1) <= 1 or
+    local function is_eligible(candidate)
+        local previous = candidate.path and candidate.path.previous
+        return not restrict or (candidate.max_rank or 1) <= 1 or
             (active_allow_duplicate_single and
-             ((previous and (previous.text or "") ~= "") or utf_length(decoded[i].text) == 1)) then
-            eligible[#eligible + 1] = decoded[i]
-        end
+             ((previous and (previous.text or "") ~= "") or utf_length(candidate.text) == 1))
     end
-    if #eligible == 0 then
-        return nil
+    -- Preserve the displayed choice, but assess its confidence against all
+    -- group-eligible beam outputs rather than just the visible twenty.
+    local first
+    for i = 1, #decoded do
+        if is_eligible(decoded[i]) then first = decoded[i]; break end
     end
-    local first = eligible[1]
+    if not first then return nil end
+    local eligible = {}
+    for _, candidate in ipairs(decoded._confidence_candidates or decoded) do
+        if is_eligible(candidate) then eligible[#eligible + 1] = candidate end
+    end
     if not first.text or first.text == "" or
         first.text:sub(1, #committed_text) ~= committed_text or
         #first.text <= #committed_text then
