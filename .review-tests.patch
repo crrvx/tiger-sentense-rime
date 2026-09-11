@@ -1,0 +1,22 @@
+--- a/tools/test_tiger_sentence_incremental.lua
++++ b/tools/test_tiger_sentence_incremental.lua
+@@ -1032,7 +1032,9 @@
+ 
+ local original_user_dir = rime_api.get_user_data_dir
+ local import_dir = repo .. "/.test_import"
+-os.execute("mkdir -p '" .. import_dir .. "'")
++local windows = package.config:sub(1, 1) == "\\"
++local quoted_import_dir = '"' .. import_dir .. '"'
++os.execute((windows and "mkdir " or "mkdir -p ") .. quoted_import_dir)
+ local import_codes = io.open(import_dir .. "/tiger_sentence.codes.txt", "wb")
+ import_codes:write(
+     "# minimal imported table\n",
+@@ -1107,7 +1109,7 @@
+ end
+ print("OK  Tab locks text/boundaries across separate environments and consumes committed raw")
+ rime_api.get_user_data_dir = original_user_dir
+-os.execute("rm -rf '" .. import_dir .. "'")
++os.execute((windows and "rmdir /s /q " or "rm -rf ") .. quoted_import_dir)
+ sentence.apply_high_freq_limit(1500)
+ local restored = sentence.data_status()
+ if restored.codes_count ~= default_codes_count or

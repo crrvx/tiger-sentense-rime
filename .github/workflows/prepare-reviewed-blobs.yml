@@ -27,6 +27,8 @@ jobs:
           cp lua/tiger_sentence.lua /tmp/reviewed-interaction.lua
           git apply .review-confidence.patch
           test "$(git hash-object lua/tiger_sentence.lua)" = 169c0776506961601f4197e7f74c9e1896fee69f
+          git apply .review-tests.patch
+          test "$(git hash-object tools/test_tiger_sentence_incremental.lua)" = f18cc87f7f49c9cac881bcc6d8491ee9ed660f4e
       - name: Create verified blobs without moving any refs
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -34,7 +36,7 @@ jobs:
         run: |
           python3 - <<'PY'
           import hashlib, json, os, pathlib, urllib.request
-          for path, expected in [('/tmp/reviewed-interaction.lua', 'c39c64d379798027d647caca454aa258235d5470'), ('lua/tiger_sentence.lua', '169c0776506961601f4197e7f74c9e1896fee69f')]:
+          for path, expected in [('/tmp/reviewed-interaction.lua', 'c39c64d379798027d647caca454aa258235d5470'), ('lua/tiger_sentence.lua', '169c0776506961601f4197e7f74c9e1896fee69f'), ('tools/test_tiger_sentence_incremental.lua', 'f18cc87f7f49c9cac881bcc6d8491ee9ed660f4e')]:
               data = pathlib.Path(path).read_bytes()
               assert hashlib.sha1(b'blob '+str(len(data)).encode()+b'\0'+data).hexdigest() == expected
               request = urllib.request.Request('https://api.github.com/repos/'+os.environ['REPO']+'/git/blobs', data=json.dumps({'content':data.decode('utf-8'),'encoding':'utf-8'}).encode(), headers={'Authorization':'Bearer '+os.environ['GH_TOKEN'],'Accept':'application/vnd.github+json','Content-Type':'application/json'}, method='POST')
