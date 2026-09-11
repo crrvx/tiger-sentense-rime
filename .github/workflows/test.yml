@@ -1,0 +1,48 @@
+name: Lua and Rime regressions
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lua:
+    name: Linux ${{ matrix.lua }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        lua: [lua5.3, lua5.4, luajit]
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: false
+      - name: Install interpreter
+        run: sudo apt-get update && sudo apt-get install -y ${{ matrix.lua }}
+      - name: Existing no-model regressions
+        shell: bash
+        run: |
+          set -o pipefail
+          ${{ matrix.lua }} tools/test_tiger_sentence_incremental.lua . | tee regression.log
+      - name: Archive exact tested sources
+        if: always()
+        run: git archive --format=zip --output=tested-source.zip HEAD
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: baseline-${{ matrix.lua }}
+          path: |
+            tested-source.zip
+            regression.log
+          retention-days: 7
+          if-no-files-found: error
