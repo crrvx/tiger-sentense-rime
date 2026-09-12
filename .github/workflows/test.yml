@@ -1,0 +1,105 @@
+name: Lua and Rime regressions
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lua:
+    name: Linux ${{ matrix.lua }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        lua: [lua5.3, lua5.4, luajit]
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: false
+      - name: Install interpreter
+        run: sudo apt-get update && sudo apt-get install -y ${{ matrix.lua }}
+      - name: Existing suite, new regressions and functional negative controls
+        shell: bash
+        run: |
+          set -o pipefail
+          python3 tools/run_regressions.py --lua ${{ matrix.lua }} --negative-control | tee regression.log
+      - name: Archive exact tested sources
+        if: always()
+        run: git archive --format=zip --output=tested-source.zip HEAD
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: regression-${{ matrix.lua }}
+          path: |
+            tested-source.zip
+            regression.log
+          retention-days: 7
+          if-no-files-found: error
+
+  windows:
+    name: Windows Lua 5.4 ${{ matrix.arch }}
+    runs-on: windows-2025
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [x64, x86]
+    env:
+      PYTHONUTF8: '1'
+      LUA_ARCH: ${{ matrix.arch }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: false
+      - name: Compile pinned official Lua and run isolated regressions
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $archive = Join-Path $env:RUNNER_TEMP 'lua-5.4.8.tar.gz'
+          Invoke-WebRequest https://www.lua.org/ftp/lua-5.4.8.tar.gz -OutFile $archive
+          if ((Get-FileHash $archive -Algorithm SHA256).Hash.ToLowerInvariant() -ne '4f18ddae154e793e46eeab727c59ef1c0c0c2b744e7b94219710d76f530629ae') { throw 'Lua source checksum mismatch' }
+          tar -xzf $archive -C $env:RUNNER_TEMP
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if (!$vs) { throw 'MSVC unavailable' }
+          Import-Module "$vs\Common7\Tools\Microsoft.VisualStudio.DevShell.dll"
+          Enter-VsDevShell -VsInstallPath $vs -SkipAutomaticLocation -DevCmdArguments "-arch=$env:LUA_ARCH -host_arch=x64"
+          $src = Join-Path $env:RUNNER_TEMP 'lua-5.4.8/src'
+          Push-Location $src
+          try {
+            $files = @(Get-ChildItem *.c | Where-Object { $_.Name -ne 'luac.c' } | ForEach-Object { $_.FullName })
+            & cl /nologo /O2 /D_CRT_SECURE_NO_WARNINGS $files /Fe:lua.exe
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          } finally { Pop-Location }
+          python tools/run_regressions.py --lua "$src/lua.exe" --negative-control
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+  rime:
+    name: Real librime processor chain
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: false
+      - name: Install real Rime development library and Lua plugin
+        run: sudo apt-get update && sudo apt-get install -y g++ librime-dev librime-plugin-lua
+      - name: Compile and exercise real sessions, menus, edits and injected model failure
+        shell: bash
+        run: |
+          set -euo pipefail
+          g++ -std=c++17 -O2 tools/rime_api_probe.cpp -lrime -ldl -o "$RUNNER_TEMP/rime-api-probe"
+          plugin=$(dpkg -L librime-plugin-lua | grep -E '/librime-lua\.so$' | head -n 1)
+          test -n "$plugin"
+          python3 tools/rime_integration_test.py --exe "$RUNNER_TEMP/rime-api-probe" --plugin "$plugin"
