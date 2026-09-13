@@ -73,7 +73,8 @@ Releases 下载，放入用户目录 `models/`。查找顺序：用户目录 `mo
 | `tiger_sentence.full_code_whitelist.txt` | 白名单字符，每行一个或连排 | 白名单字保留完整编码参与组句 |
 
 - schema 配置 `tiger_sentence/high_freq_limit`（默认 `1500`）：常用字
-  （字频前 N）只保留最优码；`0` 全部放开；负数按 `0`。
+  （字频前 N）只保留最优码；`0` 全部放开；负数按 `0`；未配置或类型非法
+  视为默认，且各方案（schema）互不继承。
 - schema 配置 `tiger_sentence/min_retained_raw_length`（默认 `0`）：
   自动上屏最少保留编码数，概率型提交仍永远不少于三键。
 - 导入其它形码码表：直接替换 `tiger_sentence.codes.txt`（编码仅限拉丁

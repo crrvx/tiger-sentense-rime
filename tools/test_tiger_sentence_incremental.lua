@@ -1030,6 +1030,44 @@ if sentence.data_status().codes_count ~= default_codes_count then
 end
 print("OK  high_freq_limit changes rebuild the index immediately")
 
+-- Schema-scoped high_freq_limit semantics: an absent key keeps the default,
+-- a negative value acts as 0, and a keyless schema never inherits another
+-- schema's configured value.
+local function config_schema_env(int_value, schema_id)
+    return { engine = { schema = {
+        schema_id = schema_id,
+        config = { get_int = function() return int_value end }
+    } } }
+end
+sentence.ensure_lexicon(config_schema_env(nil, "tiger_sentence"))
+if sentence.data_status().high_freq_limit ~= 1500 or
+    sentence.data_status().codes_count ~= default_codes_count then
+    fail("absent high_freq_limit key did not keep the default limit")
+end
+sentence.ensure_lexicon(config_schema_env(-5, "tiger_sentence"))
+if sentence.data_status().high_freq_limit ~= 0 or
+    sentence.data_status().codes_count ~= unlimited.codes_count then
+    fail("negative high_freq_limit did not act as 0")
+end
+sentence.ensure_lexicon(config_schema_env(0, "tiger_sentence_pro"))
+sentence.ensure_lexicon(config_schema_env(nil, "tiger_sentence_pro"))
+if sentence.data_status().high_freq_limit ~= 0 or
+    sentence.data_status().codes_count ~= unlimited.codes_count then
+    fail("keyless schema did not keep its own schema's limit")
+end
+sentence.ensure_lexicon(config_schema_env(nil, "tiger_sentence_other"))
+if sentence.data_status().high_freq_limit ~= 1500 or
+    sentence.data_status().codes_count ~= default_codes_count then
+    fail("keyless schema inherited another schema's high_freq_limit")
+end
+sentence.apply_high_freq_limit(0)
+sentence.apply_high_freq_limit(nil)
+if sentence.data_status().high_freq_limit ~= 0 then
+    fail("apply_high_freq_limit(nil) must be a no-op")
+end
+sentence.apply_high_freq_limit(1500)
+print("OK  high_freq_limit is schema-scoped and invalid values keep the default")
+
 local original_user_dir = rime_api.get_user_data_dir
 local import_dir = repo .. "/.test_import"
 local windows = package.config:sub(1, 1) == "\\"

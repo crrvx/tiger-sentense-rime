@@ -238,6 +238,7 @@ end
 local default_high_freq_limit = 1500
 
 local lexicon_state = {
+    limit_schema_id = nil,
     built = false,
     high_freq_limit = nil,
     codes = {},
@@ -468,8 +469,9 @@ local function rebuild_lexicon(limit)
 end
 
 local function configured_high_freq_limit(env)
-    -- Mirror CoreRuntimeState.GetSentenceOptimalCodeHighFreqLimit: an absent
-    -- key keeps the default; invalid or negative values mean 0 (no limit).
+    -- An absent key, an unreadable value, or an invalid type keeps the
+    -- current limit (the default on the first build). Negative values
+    -- mean 0 (no limit).
     local schema = env and env.engine and env.engine.schema
     local config = schema and schema.config
     if not config then
@@ -490,17 +492,24 @@ local function configured_high_freq_limit(env)
 end
 
 local function ensure_lexicon(env)
+    local ok, schema_id = pcall(function()
+        local schema = env and env.engine and env.engine.schema
+        return schema and schema.schema_id or nil
+    end)
+    if not ok then schema_id = nil end
     local limit = configured_high_freq_limit(env)
-    if lexicon_state.built then
-        if limit == nil or limit == lexicon_state.high_freq_limit then
+    if limit == nil then
+        if lexicon_state.built and schema_id == lexicon_state.limit_schema_id then
             return lexicon_state
         end
-    else
-        if limit == nil then
-            limit = default_high_freq_limit
-        end
+        limit = default_high_freq_limit
+    end
+    if lexicon_state.built and limit == lexicon_state.high_freq_limit then
+        lexicon_state.limit_schema_id = schema_id
+        return lexicon_state
     end
     rebuild_lexicon(limit)
+    lexicon_state.limit_schema_id = schema_id
     return lexicon_state
 end
 
@@ -3724,6 +3733,9 @@ M.decode_full = decode_full
 M.ensure_lexicon = ensure_lexicon
 M.data_status = data_status
 M.apply_high_freq_limit = function(limit)
+    if limit == nil then
+        return
+    end
     local value = math.floor(tonumber(limit) or 0)
     if value < 0 then
         value = 0
