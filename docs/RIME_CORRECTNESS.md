@@ -38,7 +38,8 @@ and full-model behaviour remains separate.
 ```sh
 python tools/run_regressions.py --lua lua5.4 --negative-control
 # Also tested by CI with Lua 5.3, LuaJIT (no binary-model support assumed),
-# and official Lua 5.4.8 built with MSVC for x64 and x86.
+# Arch Linux's rolling lua package, and official Lua 5.4.8 built with MSVC
+# for x64 and x86.
 ```
 
 The runner makes an owned temporary copy of scripts and plain-text resources,
