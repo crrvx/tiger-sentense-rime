@@ -24,7 +24,7 @@
 
    ```lua
    local tiger = require("tiger_sentence")
-   tiger_sentence_processor = tiger.processor
+   tiger_sentence_processor = tiger.processor_component
    tiger_sentence_translator = tiger.translator
    ```
 
@@ -33,6 +33,25 @@
 4. （可选）把 `sentence-ngram-mobile.bin` 放入用户目录 `models/`，
    见下节。
 5. 「重新部署」，然后切换到 虎整句。
+
+## 纠正学习与兼容性
+
+`tiger_sentence/tab_learning` 默认开启，覆盖 Tab 纠正和直接点选非首选候选。
+学习相对当前首选改变的片段，首选点击不反复强化，每次提交只消费一次。
+键盘手动选重也使用同一提交通知。学习影响的候选不会作为自动提前上屏的依据。
+
+学习需要宿主提供 LevelDb，数据按方案保存在用户目录的
+`tiger_sentence_learning_<散列>.userdb`。接口缺失或数据库不可用时，正常输入仍可使用。
+关闭设置会保留学习数据；备份或移走数据库前请退出 Rime。
+宿主提交通知不能证明目标应用实际插入文字。
+
+更新时请同时替换 `lua/tiger_sentence.lua` 和 `lua/tiger_sentence_learning.lua`，
+并使用上面的 `processor_component` 注册方式。合并现有配置，保留自己的码表。
+
+已修复 Lua 5.5 中对 `for` 控制变量赋值导致的
+`attempt to assign to const variable 'line'` / `'r'` 加载错误，
+以及由此引起的 processor `func type: nil`。无需修改码表或重新下载模型。
+回归覆盖 Lua 5.5、Lua 5.4 和 LuaJIT，仍需各前端实机验收。
 
 ## 语言模型（可选）
 

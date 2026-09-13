@@ -15,6 +15,7 @@ import tempfile
 import time
 
 ROOT = Path(__file__).resolve().parents[1]
+PACK = ROOT
 
 
 @contextmanager
@@ -36,15 +37,22 @@ def temporary_tree():
 
 
 def isolated_sources(destination):
-    shutil.copytree(ROOT / "lua", destination / "lua")
-    shutil.copytree(ROOT / "tools", destination / "tools", ignore=shutil.ignore_patterns("__pycache__"))
+    shutil.copytree(PACK / "lua", destination / "lua")
+    (destination / "tools").mkdir()
+    for name in ("test_tiger_sentence_incremental.lua", "test_rime_contract.lua", "test_sentence_safety.lua", "test_sentence_learning.lua"):
+        source = (ROOT / "tools" / name).read_text(encoding="utf-8")
+        # Run the shared suite in the public mirror layout, without copying
+        # unrelated TigerClaw tools or any live configuration/model files.
+        source = source.replace("", "")
+        (destination / "tools" / name).write_text(source, encoding="utf-8")
     for pattern in ("*.txt", "*.yaml", "rime.lua"):
-        for path in ROOT.glob(pattern):
+        for path in PACK.glob(pattern):
             shutil.copy2(path, destination / path.name)
 
 
 def execute(lua, root, script, override=None):
     env = os.environ.copy()
+    env["LUA_PATH"] = str(root / "lua" / "?.lua") + ";;"
     env.pop("TIGER_SENTENCE_MODULE", None)
     if override:
         env["TIGER_SENTENCE_MODULE"] = str(override)
@@ -97,7 +105,7 @@ def main():
     lua = str(Path(lua).resolve())
     with temporary_tree() as root:
         isolated_sources(root)
-        for script in ("test_tiger_sentence_incremental.lua", "test_rime_contract.lua", "test_sentence_safety.lua"):
+        for script in ("test_tiger_sentence_incremental.lua", "test_rime_contract.lua", "test_sentence_safety.lua", "test_sentence_learning.lua"):
             result = execute(lua, root, script)
             print(result.stdout, end="", flush=True)
             result.check_returncode()
