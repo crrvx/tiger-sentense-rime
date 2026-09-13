@@ -125,5 +125,5 @@ lua tools/bench_tiger_sentence_lua.lua . --mode mobile --repeat 3
 
 ## 来源与许可
 
-本方案是 [TigerClaw（虎爪）输入法](https://github.com/lvyww/tigerclaw)
-整句行为的独立 Rime 移植。许可证见 [LICENSE](LICENSE)（GPL-3.0）。
+本方案是 TigerClaw（虎爪）输入法整句行为的独立 Rime 移植。
+许可证见 [LICENSE](LICENSE)（GPL-3.0）。
