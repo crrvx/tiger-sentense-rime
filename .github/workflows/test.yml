@@ -95,19 +95,18 @@ jobs:
           persist-credentials: false
       - name: Install real Rime development library and Lua plugin
         run: sudo apt-get update && sudo apt-get install -y g++ librime-dev librime-plugin-lua
-      - name: Compile and exercise real sessions, menus, edits and injected model failure
+      - name: Test distribution compatibility and pinned modern preedit host
         shell: bash
         run: |
-          set -euo pipefail
-          g++ -std=c++17 -O2 tools/rime_api_probe.cpp -lrime -ldl -o "$RUNNER_TEMP/rime-api-probe"
-          plugin=$(dpkg -L librime-plugin-lua | grep -E '/librime-lua\.so$' | head -n 1)
-          test -n "$plugin"
-          python3 tools/rime_integration_test.py --exe "$RUNNER_TEMP/rime-api-probe" --plugin "$plugin"
-          g++ -std=c++17 -O2 tools/rime_preedit_probe.cpp -lrime -ldl -o "$RUNNER_TEMP/rime-preedit-probe"
-          g++ -std=c++17 -O2 tools/rime_options_probe.cpp -lrime -ldl -o "$RUNNER_TEMP/rime-options-probe"
-          python3 tools/test_rime_preedit_integration.py --exe "$RUNNER_TEMP/rime-preedit-probe" --plugin "$plugin"
-          python3 tools/test_rime_options_integration.py --exe "$RUNNER_TEMP/rime-options-probe" --plugin "$plugin"
-          python3 tools/test_rime_options_integration.py --exe "$RUNNER_TEMP/rime-options-probe" --plugin "$plugin" --negative-control
+          set -o pipefail
+          bash tools/run_rime_host_tests.sh 2>&1 | tee rime-host.log
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: real-rime-host
+          path: rime-host.log
+          retention-days: 7
+          if-no-files-found: error
 
   equivalence:
     name: Independent old/new decoder snapshots
