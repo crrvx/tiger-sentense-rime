@@ -74,7 +74,7 @@ jobs:
           python3 tools/run_regressions.py --lua "$(command -v lua)" --negative-control | tee regression.log
       - name: Archive exact tested sources
         if: always()
-        run: git archive --format=zip --output=tested-source.zip HEAD
+        run: git -c safe.directory="$GITHUB_WORKSPACE" archive --format=zip --output=tested-source.zip HEAD
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
