@@ -2664,7 +2664,8 @@ local function submit_early(env, state, selected, commit)
     end
 end
 
-local function invalidate_edit_state(context, state, env, first_changed, full_length)
+local function invalidate_edit_state(context, state, env, first_changed, full_length, deleted_tail)
+    local previous_lock = active_lock(state)
     state.tab_pending = false
     state.trackers = {}
     state.last_seen_raw = ""
@@ -2678,7 +2679,21 @@ local function invalidate_edit_state(context, state, env, first_changed, full_le
         table.remove(state.locks)
     end
     save_sentence_state(context, state, env)
-    reset_decode_cache()
+    -- A trailing letter cannot change any earlier selector or locked edge.
+    -- Keep the existing lattice only for the exact, still-active lock/raw
+    -- generation. decode() can then shrink its buckets and rescore the end.
+    -- Learning-affected generations retain the conservative rebuild: the
+    -- cumulative inhibition flag can include an edge in the deleted tail.
+    local cache = locked_decode_cache
+    local lock = active_lock(state)
+    local reuse_tail = deleted_tail and deleted_tail:match("^[a-z]$") and
+        first_changed == full_length and lock and lock == previous_lock and
+        cache.states and not cache.learning_affected and
+        cache.raw == normalize(state.committed_raw .. live_input(context)) and
+        #cache.raw == full_length + 1 and cache.prefix == normalize(lock.raw) and
+        cache.text == lock.text and cache.boundaries == lock.boundaries and
+        cache.allow_duplicate == active_allow_duplicate_single
+    if not reuse_tail then reset_decode_cache() end
 end
 
 local function get_min_retained_raw_length(env)
@@ -3343,7 +3358,8 @@ local function processor(key_event, env)
             if first < 0 or first >= #raw then return 1 end
             local remaining = raw:sub(1, first) .. raw:sub(first + 2)
             invalidate_edit_state(context, state, env,
-                #state.committed_raw + first, #state.committed_raw + #remaining)
+                #state.committed_raw + first, #state.committed_raw + #remaining,
+                first == #raw - 1 and raw:sub(-1) or nil)
             restore_composition_input(context, remaining)
             if type(context.caret_pos) == "number" then context.caret_pos = first + 1 end
             return 1
@@ -3358,7 +3374,8 @@ local function processor(key_event, env)
             end
             local remaining = raw:sub(1, first) .. raw:sub(first + 2)
             invalidate_edit_state(context, state, env,
-                #state.committed_raw + first, #state.committed_raw + #remaining)
+                #state.committed_raw + first, #state.committed_raw + #remaining,
+                first == #raw - 1 and raw:sub(-1) or nil)
             if remaining == "" then
                 context:clear()
                 reset_sentence_state(context, env)
@@ -3442,8 +3459,21 @@ local function translator(input, seg, env)
         if seg.start ~= 0 or input:sub(1, 1) ~= "~" then return end
         input = input:sub(2)
     end
+    -- With no live code, the only visible value is the editable buffer.
+    -- Replaying its entire locked history just to yield an empty suffix made
+    -- repeated text-only Backspace unnecessarily expensive. Do not bypass
+    -- decoding for an inconsistent/foreign lock or a nonempty suffix.
+    local lock = active_lock(state)
+    if buffered ~= "" and input == "" and lock and
+        lock.raw == committed_raw and lock.text == committed_text then
+        local cand = Candidate("sentence_buffered", seg.start, seg._end, "", "")
+        cand.quality = 1000
+        cand.preedit = buffered
+        yield(cand)
+        return
+    end
     local raw = committed_raw .. input
-    local results = decode(raw, false, committed_text, active_lock(state))
+    local results = decode(raw, false, committed_text, lock)
     local yielded = 0
     for i = 1, #results do
         local item = results[i]
