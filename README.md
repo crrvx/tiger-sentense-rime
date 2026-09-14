@@ -51,7 +51,8 @@
 关闭设置会保留学习数据；备份或移走数据库前请退出 Rime。
 宿主提交通知不能证明目标应用实际插入文字。
 
-更新时请同时替换 `lua/tiger_sentence.lua` 和 `lua/tiger_sentence_learning.lua`，
+更新时请整体替换本方案的 `lua/` 模块，包括 `tiger_sentence.lua`、
+`tiger_sentence_learning.lua`、`tiger_sentence_ngram.lua` 和 `tiger_sentence_cache.lua`，
 并同时更新主 schema、内部 ASCII schema，以及上面的四个 Lua 注册项。
 合并现有配置，保留自己的码表和学习数据库。
 
@@ -119,7 +120,8 @@
 
 ## 开发与测试
 
-性能优化保留完整 Beam 和原评分规则，测量条件见 [性能记录](tools/RIME_PERFORMANCE.md)。
+性能优化保留现有 Beam 和原评分规则，测量条件见 [性能记录](tools/RIME_PERFORMANCE.md)。
+本次等价缓存优化、长码修复及独立差分验收见 [审查改进记录](docs/REVIEW_OPTIMIZATIONS.md)。
 真实 librime 工具覆盖暂存/回删/标点（`tools/test_rime_preedit_integration.py`）、
 点选/Tab/重启学习（`tools/test_rime_learning_integration.py`）和多会话/进程重启/
 偏好迁移（`tools/test_rime_options_integration.py`）。编译对应 C++ 探针后以

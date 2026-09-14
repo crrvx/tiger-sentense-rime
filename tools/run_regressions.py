@@ -39,12 +39,12 @@ def temporary_tree():
 def isolated_sources(destination):
     shutil.copytree(PACK / "lua", destination / "lua")
     (destination / "tools").mkdir()
-    for name in ("test_tiger_sentence_incremental.lua", "test_rime_contract.lua", "test_sentence_safety.lua", "test_sentence_learning.lua"):
+    for name in ("test_tiger_sentence_incremental.lua", "test_rime_contract.lua", "test_sentence_safety.lua", "test_sentence_learning.lua", "test_review_regressions.lua", "test_ngram_reader.lua"):
         source = (ROOT / "tools" / name).read_text(encoding="utf-8")
         # Run the shared suite in the public mirror layout, without copying
         # unrelated TigerClaw tools or any live configuration/model files.
-        source = source.replace("", "")
         (destination / "tools" / name).write_text(source, encoding="utf-8")
+    shutil.copy2(ROOT / "tools/model_fixture.lua", destination / "tools/model_fixture.lua")
     for pattern in ("*.txt", "*.yaml", "rime.lua"):
         for path in PACK.glob(pattern):
             shutil.copy2(path, destination / path.name)
@@ -90,6 +90,12 @@ def negative_controls(lua, root):
         ("model-retry", "test_sentence_safety.lua",
          'decode = guarded_decode(decode)',
          '-- negative control: decode guard removed', "Model failure escaped decode guard"),
+        ("long-code-boundary", "test_review_regressions.lua",
+         'local max_code = lexicon_state.max_code_len', 'local max_code = 4',
+         "long-code incremental/full mismatch"),
+        ("learning-inhibition-parity", "test_review_regressions.lua",
+         '(left.learning_affected or false) ~= (right.learning_affected or false)', 'false',
+         "behavior-bearing snapshot mutation was ignored"),
     ]
     for name, script, before, after, expected in variants:
         if source.count(before) != 1:
@@ -97,6 +103,31 @@ def negative_controls(lua, root):
         mutant = root / (name + ".lua")
         mutant.write_text(source.replace(before, after), encoding="utf-8")
         result = execute(lua, root, script, mutant)
+        if result.returncode == 0 or expected not in result.stdout:
+            raise RuntimeError(f"Negative control did not fail at its functional assertion: {name}\n{result.stdout}")
+        print(json.dumps({"negative_control": name, "status": "detected"}), flush=True)
+    # Helper-module mutants run in this owned copy only and are always restored.
+    helpers = [
+        ("learning-window", "tiger_sentence_learning.lua", "test_review_regressions.lua",
+         'for i = lo, math.min(#codes, lo + 63) do', 'for i = lo, math.min(#codes, lo + 64) do',
+         "equal code no longer consumes the 64-slot window"),
+        ("observed-zero", "tiger_sentence_ngram.lua", "test_ngram_reader.lua",
+         'return cached[1], cached[2], cached[3]', 'return cached[1], cached[2], cached[2] ~= 0',
+         "zero-valued observed record was confused with missing"),
+    ]
+    for name, module, script, before, after, expected in helpers:
+        path = root / "lua" / module
+        original = path.read_text(encoding="utf-8")
+        if original.count(before) != 1:
+            raise RuntimeError(f"Negative-control anchor changed: {name}")
+        try:
+            path.write_text(original.replace(before, after), encoding="utf-8")
+            result = execute(lua, root, script)
+        finally:
+            path.write_text(original, encoding="utf-8")
+        if name == "observed-zero" and '"status":"skipped"' in result.stdout and result.returncode == 0:
+            print(json.dumps({"negative_control": name, "status": "skipped", "reason": "binary API unavailable"}), flush=True)
+            continue
         if result.returncode == 0 or expected not in result.stdout:
             raise RuntimeError(f"Negative control did not fail at its functional assertion: {name}\n{result.stdout}")
         print(json.dumps({"negative_control": name, "status": "detected"}), flush=True)
@@ -113,7 +144,7 @@ def main():
     lua = str(Path(lua).resolve())
     with temporary_tree() as root:
         isolated_sources(root)
-        for script in ("test_tiger_sentence_incremental.lua", "test_rime_contract.lua", "test_sentence_safety.lua", "test_sentence_learning.lua"):
+        for script in ("test_tiger_sentence_incremental.lua", "test_rime_contract.lua", "test_sentence_safety.lua", "test_sentence_learning.lua", "test_review_regressions.lua", "test_ngram_reader.lua"):
             result = execute(lua, root, script)
             print(result.stdout, end="", flush=True)
             result.check_returncode()

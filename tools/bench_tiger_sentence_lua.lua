@@ -36,7 +36,7 @@ local sentence = require("tiger_sentence")
 sentence.ensure_lexicon(nil)
 sentence.set_model_enabled(mode ~= "none")
 local model = sentence.model_status()
-if require_model and not model.loaded then
+if (require_model or mode == "mobile") and not model.loaded then
     io.stderr:write("sentence model is required: " .. tostring(model.error) .. "\n")
     os.exit(2)
 end
