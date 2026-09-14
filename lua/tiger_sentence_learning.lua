@@ -1,6 +1,7 @@
 -- Tab correction learning. Rime owns the LevelDb lock and durable records;
 -- decoding uses only immutable in-memory indexes. No Windows receipt is implied.
 local M = {}
+local memo = require("tiger_sentence_cache")
 local function chars(text)
     local result = {}
     for c in text:gmatch("[%z\1-\127\194-\244][\128-\191]*") do
@@ -224,23 +225,83 @@ function M.score(index, mode, code, text, ctx)
     local values = materialize(index, code)
     return values and score(values.exact[key(code, mode, text)], ctx) or 0
 end
-function M.prefix_score(index, mode, code, text, ctx)
-    if code == "" or text == "" then return 0 end
-    local codes, lo, hi = index.codes, 1, #index.codes + 1
+-- Code vectors and scoring snapshots are immutable after publication. Weak
+-- owners release unused epochs, while each surviving owner's caches are bounded.
+local code_windows = setmetatable({}, {__mode="k"})
+local prefix_queries = setmetatable({}, {__mode="k"})
+local function code_window(codes, code)
+    local cache = code_windows[codes]
+    if not cache then cache = memo.new(2048); code_windows[codes] = cache end
+    local window = cache.values[code]
+    if window then return window[1], window[2] end
+    local lo, hi = 1, #codes + 1
     while lo < hi do
         local mid = math.floor((lo + hi) / 2)
         if codes[mid] < code then lo = mid + 1 else hi = mid end
     end
-    local best = 0
+    local last = lo - 1
+    -- Preserve the old 64-slot window exactly: an equal code consumes a slot
+    -- even though it is not itself a longer-code prefix match.
     for i = lo, math.min(#codes, lo + 63) do
+        if codes[i]:sub(1, #code) ~= code then break end
+        last = i
+    end
+    memo.put(cache, code, {lo, last})
+    return lo, last
+end
+function M.prefix_score(index, mode, code, text, ctx)
+    if code == "" or text == "" then return 0 end
+    local codes = index.codes
+    local first, last = code_window(codes, code)
+    if first > last then return 0 end
+    local cache = prefix_queries[index]
+    if not cache then cache = memo.new(4096); prefix_queries[index] = cache end
+    local query = key(mode, code, text, ctx)
+    local cached = cache.values[query]
+    if cached ~= nil then return cached end
+    local best = 0
+    for i = first, last do
         local value = codes[i]
-        if value:sub(1, #code) ~= code then break end
         if #value > #code then
             local values = materialize(index, value)
             best = math.max(best, score(values.prefixes[key(value, mode, text)], ctx))
         end
     end
-    return best
+    return memo.put(cache, query, best)
+end
+
+-- Same UTF-8 acceptance as chars(), including a zero result for malformed input,
+-- but count without allocating an array or concatenating all characters again.
+local function character_count(text)
+    local count, position = 0, 1
+    while position <= #text do
+        local a, b, c, d = text:byte(position, position + 3)
+        local length
+        if a < 128 then length = 1
+        elseif a >= 194 and a <= 223 and b and b >= 128 and b <= 191 then length = 2
+        elseif a >= 224 and a <= 239 and b and b >= 128 and b <= 191 and
+            c and c >= 128 and c <= 191 and (a ~= 224 or b >= 160) and
+            (a ~= 237 or b < 160) then length = 3
+        elseif a >= 240 and a <= 244 and b and b >= 128 and b <= 191 and
+            c and c >= 128 and c <= 191 and d and d >= 128 and d <= 191 and
+            (a ~= 240 or b >= 144) and (a ~= 244 or b < 144) then length = 4
+        else return 0 end
+        position, count = position + length, count + 1
+    end
+    return count
+end
+local function path_context(start, text, length)
+    local prefix = text:sub(1, length)
+    if not start or start.text ~= prefix or start.text_length ~= length then
+        return context(prefix) -- compatibility calls without full path metadata
+    end
+    if start._learning_context_source ~= prefix then
+        -- Use the original validator, not BOS sentinels or unchecked prev1/prev2.
+        -- This preserves malformed UTF-8 and actual control-character behavior.
+        start._learning_context = context(prefix)
+        start._learning_context_source = prefix
+    end
+    return start._learning_context
 end
 function M.reward(index, mode, raw, text, finish, previous)
     local best, potential, start = previous.learning_score or 0, 0, previous
@@ -248,8 +309,8 @@ function M.reward(index, mode, raw, text, finish, previous)
     while true do
         local t, r = start and start.text_length or 0, start and start.raw_length or 0
         local fragment = text:sub(t + 1)
-        if #chars(fragment) > 16 then break end
-        local code, ctx = raw:sub(r + 1, finish), context(text:sub(1, t))
+        if character_count(fragment) > 16 then break end
+        local code, ctx = raw:sub(r + 1, finish), path_context(start, text, t)
         best = math.max(best, (start and start.learning_score or 0) + M.score(index, mode, code, fragment, ctx))
         potential = math.max(potential, M.prefix_score(index, mode, code, fragment, ctx))
         if not start or r == 0 then break end
@@ -257,6 +318,7 @@ function M.reward(index, mode, raw, text, finish, previous)
     end
     return best, potential
 end
+
 function M.diff(raw, before, selected, floor, mode)
     local function boundaries(item)
         local map, ends, node = {[0]=0}, {}, item.path
