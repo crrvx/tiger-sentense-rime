@@ -175,6 +175,25 @@ int main(int argc, char** argv) {
         api->set_option(session, "tiger_sentence_early_commit_to_preedit", False);
         type("b"); key(' '); check(committed == "刘甲", "option toggle lost pending text");
 
+        // A long live suffix after a buffered prefix must remain editable.
+        // Disable automatic advancement so Backspace really exercises the long
+        // locked suffix, rather than repeatedly shortening it via auto-commit.
+        reset(); type("vpa"); held("刘");
+        api->set_option(session, "tiger_sentence_early_commit", False);
+        type("b");
+        for (int i = 0; i < 40; ++i) type("ab");
+        std::string suffix;
+        for (int i = 0; i < 41; ++i) suffix += "甲";
+        check(first() == suffix, "long buffered suffix was not decoded");
+        for (int i = 0; i < 24; ++i) { key(0xff08); held("刘"); }
+        suffix.clear();
+        for (int i = 0; i < 29; ++i) suffix += "甲";
+        check(first() == suffix, "long suffix Backspace changed candidates");
+        type("ab"); suffix += "甲";
+        check(first() == suffix, "append after long suffix deletion failed");
+        key(' ');
+        check(committed == "刘" + suffix, "long edited suffix submission lost text");
+
         reset(); type("ef");
         const int learned_before = std::stoi(property("review_learning_count"));
         key(0xff09); type("a"); held("丙");

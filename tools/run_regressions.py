@@ -49,6 +49,7 @@ def isolated_sources(destination):
         for path in PACK.glob(pattern):
             shutil.copy2(path, destination / path.name)
     shutil.copy2(ROOT / "tools/test_high_freq_limit.lua", destination / "tools/test_high_freq_limit.lua")
+    shutil.copy2(ROOT / "tools/test_backspace.lua", destination / "tools/test_backspace.lua")
 
 
 def execute(lua, root, script, override=None):
@@ -101,6 +102,20 @@ def negative_controls(lua, root):
          '(left.learning_affected or false) ~= (right.learning_affected or false)', 'false',
          "behavior-bearing snapshot mutation was ignored"),
     ]
+    variants.extend([
+        ("tail-backspace-reset", "test_backspace.lua",
+         'if not reuse_tail then reset_decode_cache() end', 'reset_decode_cache()',
+         "Tail Backspace rebuilt the locked lattice"),
+        ("selector-tail-reuse", "test_backspace.lua",
+         'deleted_tail and deleted_tail:match("^[a-z]$")', 'deleted_tail',
+         "unsafe edit bypassed conservative rebuild"),
+        ("learned-tail-reuse", "test_backspace.lua",
+         'cache.states and not cache.learning_affected and', 'cache.states and',
+         "learning-affected deletion reused cumulative inhibition"),
+        ("text-only-replay", "test_backspace.lua",
+         'if buffered ~= "" and input == "" and lock and', 'if false and input == "" and lock and',
+         "Text-only Backspace replayed locked history"),
+    ])
     for name, script, before, after, expected in variants:
         if source.count(before) != 1:
             raise RuntimeError(f"Negative-control anchor changed: {name}")
@@ -156,6 +171,9 @@ def main():
             print(result.stdout, end="", flush=True)
             result.check_returncode()
         result = execute(lua, root, "test_high_freq_limit.lua")
+        print(result.stdout, end="", flush=True)
+        result.check_returncode()
+        result = execute(lua, root, "test_backspace.lua")
         print(result.stdout, end="", flush=True)
         result.check_returncode()
         if args.negative_control:
