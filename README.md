@@ -11,7 +11,7 @@
 - 明文码表/字频/白名单（txt），可直接编辑或导入其它形码码表。
 - 可选 Kneser-Ney n-gram 语言模型（TCSKNM02 分页格式，Lua 直接读取）；
   无模型时自动降级为「码表名次 → 更少码表边 → 分数」排序。
-- 概率型自动提前上屏与空码自动上屏，规则与 TigerClaw Windows 版一致。
+- 概率型自动提前上屏与空码自动上屏；可选择先暂存在编码区，最后一次性提交。
 - 允许单字重码组句（可开关）：分段路径中的非首选单字按语言模型分数竞争。
 - 标点由 `symbols.yaml` 直通上屏；数字后的句号自动输出半角小数点 `.`。
 
@@ -19,13 +19,16 @@
 
 1. 复制本方案全部文件到 Rime 用户目录（Windows 默认
    `%APPDATA%\Rime\`）：`tiger_sentence.schema.yaml`、`lua/`、三个
-   `tiger_sentence.*.txt`、`tiger_sentence.supplement.txt`、`symbols.yaml`。
+   `tiger_sentence.*.txt`、`tiger_sentence.supplement.txt`、`symbols.yaml`，
+   以及内部配置 `tiger_sentence_ascii.schema.yaml`（不加入 schema_list）。
 2. 在已有的 `rime.lua` 中合并注册（若没有则直接复制本包的 `rime.lua`）：
 
    ```lua
    local tiger = require("tiger_sentence")
    tiger_sentence_processor = tiger.processor_component
    tiger_sentence_translator = tiger.translator
+   tiger_sentence_ascii = tiger.ascii_component
+   tiger_sentence_buffer_filter = tiger.buffer_filter
    ```
 
 3. 在已有的 `default.custom.yaml` 的 schema_list 中加入 `tiger_sentence`
@@ -39,6 +42,9 @@
 `tiger_sentence/tab_learning` 默认开启，覆盖 Tab 纠正和直接点选非首选候选。
 学习相对当前首选改变的片段，首选点击不反复强化，每次提交只消费一次。
 键盘手动选重也使用同一提交通知。学习影响的候选不会作为自动提前上屏的依据。
+每次纠正相当于补充语料权重 1000，首次奖励 9 分，两次约 10.386 分，
+上限 16 分；累计权重按 30 天半衰期衰减，竞争选择会降低旧偏好。
+现有记录按相同规则重建，无需清空学习数据。
 
 学习需要宿主提供 LevelDb，数据按方案保存在用户目录的
 `tiger_sentence_learning_<散列>.userdb`。接口缺失或数据库不可用时，正常输入仍可使用。
@@ -46,7 +52,8 @@
 宿主提交通知不能证明目标应用实际插入文字。
 
 更新时请同时替换 `lua/tiger_sentence.lua` 和 `lua/tiger_sentence_learning.lua`，
-并使用上面的 `processor_component` 注册方式。合并现有配置，保留自己的码表。
+并同时更新主 schema、内部 ASCII schema，以及上面的四个 Lua 注册项。
+合并现有配置，保留自己的码表和学习数据库。
 
 已修复 Lua 5.5 中对 `for` 控制变量赋值导致的
 `attempt to assign to const variable 'line'` / `'r'` 加载错误，
@@ -55,8 +62,8 @@
 
 ## 语言模型（可选）
 
-模型文件 `sentence-ngram-mobile.bin`（TCSKNM02，约 224 MiB）从本仓库
-Releases 下载，放入用户目录 `models/`。查找顺序：用户目录 `models/` →
+模型文件 `sentence-ngram-mobile.bin`（TCSKNM02，约 214 MiB）从本仓库
+[Releases](https://github.com/lvyww/tiger-sentense-rime/releases) 下载，放入用户目录 `models/`。查找顺序：用户目录 `models/` →
 用户目录根部 → 共享目录 `models/`。
 
 没有模型时方案完全可用：解码按码表名次优先，整码单字不会被多段拼接
@@ -100,7 +107,7 @@ Releases 下载，放入用户目录 `models/`。查找顺序：用户目录 `mo
 - `允许单字重码组句` 开关（默认开）：分段路径中的非首选单字按语言模型
   分数竞争；`提前上屏` 开关同时控制概率型提前上屏与空码自动上屏。
 
-自动上屏规则与 TigerClaw Windows 版一致：`(文本前缀, raw 边界)` 独立
+自动上屏按 `(文本前缀, raw 边界)` 独立
 累计证据，置信阈值 `0.995`、强证据/边界封闭 `0.99999`；截断的候选池
 绝不触发高置信空码上屏；提交通过一次原子输入赋值重建 composition，
 避免候选窗闪烁。
@@ -108,6 +115,13 @@ Releases 下载，放入用户目录 `models/`。查找顺序：用户目录 `mo
 一个候选误认为真正唯一；同一文本的不同切分不算不同输出。
 
 ## 开发与测试
+
+性能优化保留完整 Beam 和原评分规则，测量条件见 [性能记录](tools/RIME_PERFORMANCE.md)。
+真实 librime 工具覆盖暂存/回删/标点（`tools/test_rime_preedit_integration.py`）、
+点选/Tab/重启学习（`tools/test_rime_learning_integration.py`）和多会话/进程重启/
+偏好迁移（`tools/test_rime_options_integration.py`）。编译对应 C++ 探针后以
+`--exe <探针> --plugin <librime-lua.so>` 运行；模型测试另传 `--model` 或
+`--production-model`。它们只使用临时目录，不代替前端实机验收。
 
 ```bash
 # 无模型全量测试（Lua 5.3+；LuaJIT 亦可）
@@ -118,10 +132,36 @@ lua tools/test_tiger_sentence_incremental.lua . --require-model
 
 # 解码性能基准
 lua tools/bench_tiger_sentence_lua.lua . --mode mobile --repeat 3
+
+# 全套隔离回归；同样使用 Lua 5.5 和 LuaJIT 运行
+python3 tools/run_regressions.py --lua lua --negative-control
+
+# 学习索引 CPU 基准，不读写真实学习数据库
+lua tools/bench_rime_learning.lua lua 10
 ```
 
 诊断：Lua 模块导出 `data_status()`（码表/字频/白名单加载状态）与
 `performance_status()`（解码耗时、缺页、缓存命中）。
+
+## 提前上屏至编码与开关记忆
+
+同时开启“提前上屏”和“提前上屏至编码”（后者默认关），提前确认的文字暂存在
+预编辑区，候选只显示尚未确认的后缀。空格或点选合并整段后提交到应用。
+退格先删除剩余编码，到边界后逐字删除暂存文字，不恢复原编码；只剩暂存文字时
+隐藏候选列表，继续输入后恢复。逗号等标点先提交整段，再按标点配置处理。
+回车提交暂存文字和剩余编码；Esc、取消和切换方案取消暂存。
+学习等待最终宿主提交。中途关闭选项不会丢失已暂存文字。
+
+“提前上屏”“单字重码组句”“提前上屏至编码”记住最后选择，跨应用和重启后恢复；
+已打开的其他会话在下一次输入前同步。菜单和手机 API 切换均适用。
+偏好保存在用户目录 `tiger_sentence.options.yaml`，更新时保留，本仓库不分发个人偏好。
+已有 `user.yaml` 中保存的这三个值可作为首次迁移来源。
+首次默认值为开、开、关，配置在 `tiger_sentence/option_defaults/` 下，保存值优先。
+这三个 switch 不应配置 `reset`，否则新会话会强制恢复默认；升级时同时更新 Lua
+和主 schema，并移除旧自定义补丁中针对这三个开关的 `reset`。
+
+锁定前缀使用增量缓存；学习只更新受影响的编码分区，时间衰减按查询需要计算。
+码表初始化、置信度对象分配、暂存显示和模型页缓存也做了优化。
 
 ## 来源与许可
 
