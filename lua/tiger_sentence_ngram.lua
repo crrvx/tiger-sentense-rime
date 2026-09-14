@@ -5,6 +5,8 @@ local SHIFT = 2097152
 local MOBILE_HEADER_SIZE = 104
 local MOBILE_CACHE_BYTES = 8 * 1024 * 1024
 local CONTEXT_CACHE_ENTRIES = 16384
+local INDEX_PAGE_RECORDS = 256 -- 4 KiB of the existing 16-byte sparse index
+local INDEX_CACHE_PAGES = 64
 local memo = require("tiger_sentence_cache")
 local M = {}
 function M.new(performance)
@@ -193,7 +195,7 @@ local function load_legacy(path)
     }
 end
 
-local function load_mobile(path)
+local function load_mobile(path, limits)
     local file = assert(io.open(path, "rb"), "cannot open n-gram: " .. path)
     local function read_model()
     local header = file:read(MOBILE_HEADER_SIZE)
@@ -217,9 +219,44 @@ local function load_mobile(path)
         return value
     end
 
+    local page_limit = limits and limits.page_bytes or MOBILE_CACHE_BYTES
+    local context_limit = limits and limits.context_entries or CONTEXT_CACHE_ENTRIES
+    local bigram_limit = limits and limits.bigram_entries or 8192
+    local index_limit = limits and limits.index_pages or INDEX_CACHE_PAGES
+    local index_misses, index_bytes_read = 0, 0
+    -- Keep only each index page's first key resident. On the production model
+    -- this replaces a multi-MiB string with a small directory and bounded pages.
+    -- No model conversion, quantization, key reordering or lost records.
+    local function open_index(offset, count)
+        local index = {offset=offset, count=count, pages=math.ceil(count / INDEX_PAGE_RECORDS),
+            cache=memo.new(index_limit)}
+        if count <= INDEX_PAGE_RECORDS then
+            index.data = read_at(offset, count * 16)
+        else
+            local keys = {}
+            for page = 0, index.pages - 1 do
+                keys[#keys + 1] = read_at(offset + page * INDEX_PAGE_RECORDS * 16, 8)
+            end
+            index.directory = table.concat(keys)
+        end
+        return index
+    end
+    local function index_page(index, page)
+        if index.data then return index.data end
+        local data = index.cache.values[page]
+        if data then return data end
+        local first = page * INDEX_PAGE_RECORDS
+        data = read_at(index.offset + first * 16, math.min(INDEX_PAGE_RECORDS, index.count - first) * 16)
+        index_misses, index_bytes_read = index_misses + 1, index_bytes_read + #data
+        return memo.put(index.cache, page, data)
+    end
+    local function index_offset(index, record)
+        local page = math.floor(record / INDEX_PAGE_RECORDS)
+        return string.unpack("<I8", index_page(index, page), (record % INDEX_PAGE_RECORDS) * 16 + 9)
+    end
     local unigrams = read_at(uni_off, uni_count * 8)
-    local bi_index = read_at(bi_index_off, bi_index_count * 16)
-    local tri_index = read_at(tri_index_off, tri_index_count * 16)
+    local bi_index = open_index(bi_index_off, bi_index_count)
+    local tri_index = open_index(tri_index_off, tri_index_count)
     local unknown = string.unpack("<f", unigrams, 5)
     -- Small resident section: decode once instead of binary-searching and
     -- unpacking it for every uncached trigram probability.
@@ -234,8 +271,8 @@ local function load_mobile(path)
     local lru_head = nil
     local lru_tail = nil
     local context_caches = {
-        b = { values = {}, keys = {}, next = 1 },
-        t = { values = {}, keys = {}, next = 1 }
+        b = memo.new_columns(context_limit, 4),
+        t = memo.new_columns(context_limit, 4)
     }
 
     local function unlink(entry)
@@ -272,17 +309,27 @@ local function load_mobile(path)
         return string.unpack("<I8", data, index * 16 + 1)
     end
 
-    local function find_page(data, count, key)
-        local low, high = 0, count
-        while low < high do
-        local middle = low + math.floor((high - low) / 2)
-            if index_key(data, middle) <= key then
-                low = middle + 1
-            else
-                high = middle
+    local function find_page(index, count, key)
+        local page = 0
+        if index.directory then
+            local low, high = 0, index.pages
+            while low < high do
+                local middle = low + math.floor((high - low) / 2)
+                if string.unpack("<I8", index.directory, middle * 8 + 1) <= key then
+                    low = middle + 1
+                else high = middle end
             end
+            if low == 0 then return -1 end
+            page = low - 1
         end
-        return low - 1
+        local first = page * INDEX_PAGE_RECORDS
+        local data = index_page(index, page)
+        local low, high = 0, math.min(INDEX_PAGE_RECORDS, count - first)
+        while low < high do
+            local middle = low + math.floor((high - low) / 2)
+            if index_key(data, middle) <= key then low = middle + 1 else high = middle end
+        end
+        return first + low - 1
     end
 
     local function get_page(kind, index_data, index_count, page, section_end)
@@ -292,11 +339,10 @@ local function load_mobile(path)
             touch(entry)
             return entry.data
         end
-        local at = page * 16 + 1
-        local offset = string.unpack("<I8", index_data, at + 8)
+        local offset = index_offset(index_data, page)
         local next_offset = section_end
         if page + 1 < index_count then
-            next_offset = string.unpack("<I8", index_data, at + 24)
+            next_offset = index_offset(index_data, page + 1)
         end
         local data = read_at(offset, next_offset - offset)
         performance.page_misses = performance.page_misses + 1
@@ -305,7 +351,7 @@ local function load_mobile(path)
         page_cache[page] = entry
         cache_bytes = cache_bytes + entry.bytes
         touch(entry)
-        while cache_bytes > MOBILE_CACHE_BYTES and lru_tail and lru_tail ~= entry do
+        while cache_bytes > page_limit and lru_tail and lru_tail ~= entry do
             local victim = lru_tail
             unlink(victim)
             cache[victim.kind][victim.page] = nil
@@ -336,30 +382,22 @@ local function load_mobile(path)
 
     local function lookup_context(kind, index_data, index_count, context_count, section_end, key, target)
         local context_cache = context_caches[kind]
-        local cached_context = context_cache.values[key]
-        if cached_context then
-            if cached_context.missing then
-                return 1.0, 0.0, false
-            end
-            local data = get_page(
-                kind, index_data, index_count, cached_context.page, section_end)
-            return lookup_successor(data, cached_context.successor_position,
-                cached_context.successor_count, cached_context.lambda, target)
+        local slot = context_cache.values[key]
+        if slot then
+            local columns = context_cache.columns
+            local page = columns[1][slot]
+            if page == false then return 1.0, 0.0, false end
+            local data = get_page(kind, index_data, index_count, page, section_end)
+            return lookup_successor(data, columns[2][slot], columns[3][slot], columns[4][slot], target)
         end
 
-        local function remember(value)
-            local old_key = context_cache.keys[context_cache.next]
-            if old_key ~= nil then
-                context_cache.values[old_key] = nil
-            end
-            context_cache.values[key] = value
-            context_cache.keys[context_cache.next] = key
-            context_cache.next = context_cache.next % CONTEXT_CACHE_ENTRIES + 1
+        local function remember(page, position, count, lambda)
+            memo.put_columns(context_cache, key, page, position or 0, count or 0, lambda or 1.0)
         end
 
         local page = find_page(index_data, index_count, key)
         if page < 0 then
-            remember({ missing = true })
+            remember(false)
             return 1.0, 0.0, false
         end
         local data = get_page(kind, index_data, index_count, page, section_end)
@@ -369,40 +407,36 @@ local function load_mobile(path)
             local context_key, lambda, successor_count
             context_key, lambda, successor_count, position = string.unpack("<I8fI4", data, position)
             if context_key == key then
-                remember({
-                    page = page,
-                    lambda = lambda,
-                    successor_count = successor_count,
-                    successor_position = position
-                })
+                remember(page, position, successor_count, lambda)
                 return lookup_successor(data, position, successor_count, lambda, target)
             end
             if context_key > key then
-                remember({ missing = true })
+                remember(false)
                 return 1.0, 0.0, false
             end
             position = position + successor_count * 8
         end
-        remember({ missing = true })
+        remember(false)
         return 1.0, 0.0, false
     end
 
     -- A bigram query is shared by multiple trigram histories and by isolation
     -- checks. Keep raw float values and observed-ness distinct (zero can be an
     -- observed record). The 42-bit pair key is exact even on double-only Lua.
-    local bigram_cache = memo.new(8192)
+    local bigram_cache = memo.new_columns(bigram_limit, 3)
     local bigram_hits, bigram_misses = 0, 0
     local function lookup_bigram(context, target)
         local key = pack2(context, target)
         local cached = bigram_cache.values[key]
         if cached then
             bigram_hits = bigram_hits + 1
-            return cached[1], cached[2], cached[3]
+            local columns = bigram_cache.columns
+            return columns[1][cached], columns[2][cached], columns[3][cached]
         end
         bigram_misses = bigram_misses + 1
         local lambda, probability, observed = lookup_context(
             "b", bi_index, bi_index_count, bi_ctx_count, bi_index_off, context, target)
-        memo.put(bigram_cache, key, {lambda, probability, observed})
+        memo.put_columns(bigram_cache, key, lambda, probability, observed)
         return lambda, probability, observed
     end
 
@@ -425,22 +459,57 @@ local function load_mobile(path)
         return observed
     end
 
-    return {
+    local function trim_caches()
+        cache, cache_bytes, lru_head, lru_tail = {b={}, t={}}, 0, nil, nil
+        context_caches = {b=memo.new_columns(context_limit, 4), t=memo.new_columns(context_limit, 4)}
+        bigram_cache = memo.new_columns(bigram_limit, 3)
+        bi_index.cache, tri_index.cache = memo.new(index_limit), memo.new(index_limit)
+    end
+    local model
+    local function configure_cache(values)
+        local p, c, b, i = values.page_bytes, values.context_entries, values.bigram_entries, values.index_pages
+        assert(p >= 1 and c >= 1 and b >= 1 and i >= 1, "invalid model cache limits")
+        if page_limit == p and context_limit == c and bigram_limit == b and index_limit == i then return end
+        page_limit, context_limit, bigram_limit, index_limit = p, c, b, i
+        model.cache_limit_bytes = page_limit
+        trim_caches()
+    end
+    local function resident_bytes(index)
+        return #(index.data or index.directory)
+    end
+    local function cached_bytes(index)
+        local bytes = 0
+        for _, data in pairs(index.cache.values) do bytes = bytes + #data end
+        return bytes
+    end
+    model = {
         path = path,
         bytes = file_size,
         format = "TCSKNM02",
-        resident_index_bytes = #unigrams + #bi_index + #tri_index,
-        cache_limit_bytes = MOBILE_CACHE_BYTES,
+        -- Packed index bytes exclude the decoded unigram Lua table and metadata.
+        resident_index_bytes = resident_bytes(bi_index) + resident_bytes(tri_index),
+        source_index_bytes = uni_count * 8 + bi_index_count * 16 + tri_index_count * 16,
+        cache_limit_bytes = page_limit,
         cache_status = function()
-            return {page_bytes=cache_bytes, bigram_entries=#bigram_cache.keys,
-                bigram_limit=bigram_cache.limit, bigram_hits=bigram_hits, bigram_misses=bigram_misses}
+            return {page_bytes=cache_bytes, page_limit=page_limit,
+                resident_index_bytes=resident_bytes(bi_index) + resident_bytes(tri_index),
+                index_cache_bytes=cached_bytes(bi_index) + cached_bytes(tri_index),
+                index_cache_limit=2 * index_limit * INDEX_PAGE_RECORDS * 16,
+                index_misses=index_misses, index_bytes_read=index_bytes_read,
+                bigram_entries=#bigram_cache.keys, bigram_limit=bigram_limit,
+                context_entries=#context_caches.b.keys + #context_caches.t.keys,
+                context_limit=2 * context_limit, bigram_hits=bigram_hits, bigram_misses=bigram_misses}
         end,
+        configure_cache = configure_cache,
+        trim_caches = trim_caches,
         logp = logp,
         has_observed_bigram = has_observed_bigram,
         close = function()
             if file then file:close(); file = nil end
+            trim_caches()
         end
     }
+    return model
     end
     local ok, model = pcall(read_model)
     if not ok then
@@ -450,21 +519,21 @@ local function load_mobile(path)
     return model
 end
 
-function kn_reader.load(path)
+function kn_reader.load(path, limits)
     local file = assert(io.open(path, "rb"), "cannot open n-gram: " .. path)
     local magic = file:read(8)
     file:close()
     if magic == "TCSKNM02" then
-        return load_mobile(path)
+        return load_mobile(path, limits)
     end
     return load_legacy(path)
 end
 
-function kn_reader.try_load()
+function kn_reader.try_load(limits)
     local failures = {}
     for _, path in ipairs(kn_reader.candidate_paths()) do
         if file_exists(path) then
-            local ok, model = pcall(kn_reader.load, path)
+            local ok, model = pcall(kn_reader.load, path, limits)
             if ok then
                 return model, nil
             end

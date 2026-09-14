@@ -34,6 +34,12 @@ jobs:
         run: |
           set -o pipefail
           python3 tools/run_regressions.py --lua ${{ matrix.lua }} --negative-control | tee regression.log
+      - name: Compile and exercise the counting-allocator memory probe
+        if: matrix.lua == 'lua5.4'
+        run: |
+          sudo apt-get install -y liblua5.4-dev pkg-config
+          cc -O2 tools/lua_memory_runner.c $(pkg-config --cflags --libs lua5.4) -o "$RUNNER_TEMP/lua-memory"
+          "$RUNNER_TEMP/lua-memory" tools/test_memory.lua .
       - name: Archive exact tested sources
         if: always()
         run: git archive --format=zip --output=tested-source.zip HEAD
@@ -161,6 +167,7 @@ jobs:
           git archive "$BASE_REF" | tar -x -C "$baseline"
           python3 tools/compare_revisions.py --baseline "$baseline" --lua lua5.4 --cases 20 --report equivalence-none.json
           python3 tools/compare_revisions.py --baseline "$baseline" --lua lua5.4 --fixture --cases 20 --report equivalence-fixture.json
+          python3 tools/compare_revisions.py --baseline "$baseline" --lua lua5.4 --fixture --memory-profile compact --trim-every 37 --cases 20 --report equivalence-compact.json
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:

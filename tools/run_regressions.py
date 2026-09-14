@@ -39,7 +39,7 @@ def temporary_tree():
 def isolated_sources(destination):
     shutil.copytree(PACK / "lua", destination / "lua")
     (destination / "tools").mkdir()
-    for name in ("test_tiger_sentence_incremental.lua", "test_rime_contract.lua", "test_sentence_safety.lua", "test_sentence_learning.lua", "test_review_regressions.lua", "test_ngram_reader.lua"):
+    for name in ("test_tiger_sentence_incremental.lua", "test_rime_contract.lua", "test_sentence_safety.lua", "test_sentence_learning.lua", "test_review_regressions.lua", "test_ngram_reader.lua", "test_memory.lua"):
         source = (ROOT / "tools" / name).read_text(encoding="utf-8")
         # Run the shared suite in the public mirror layout, without copying
         # unrelated TigerClaw tools or any live configuration/model files.
@@ -65,6 +65,10 @@ def execute(lua, root, script, override=None):
 def negative_controls(lua, root):
     source = (root / "lua/tiger_sentence.lua").read_text(encoding="utf-8")
     variants = [
+        ("memory-schema-less", "test_memory.lua",
+         'if not env or not schema then return end',
+         'if not env or not schema then set_memory_profile("balanced"); return end',
+         "schema-less decode reset compact profile"),
         ("internal-limit", "test_high_freq_limit.lua",
          'if not schema then', 'if false then',
          "First decode reset explicit high_freq_limit zero"),
@@ -108,11 +112,14 @@ def negative_controls(lua, root):
         print(json.dumps({"negative_control": name, "status": "detected"}), flush=True)
     # Helper-module mutants run in this owned copy only and are always restored.
     helpers = [
+        ("memory-learning-cap", "tiger_sentence_learning.lua", "test_memory.lua",
+         'local MATERIALIZED_CODE_LIMIT = 256', 'local MATERIALIZED_CODE_LIMIT = 10000',
+         "materialized learning cache is unbounded"),
         ("learning-window", "tiger_sentence_learning.lua", "test_review_regressions.lua",
          'for i = lo, math.min(#codes, lo + 63) do', 'for i = lo, math.min(#codes, lo + 64) do',
          "equal code no longer consumes the 64-slot window"),
         ("observed-zero", "tiger_sentence_ngram.lua", "test_ngram_reader.lua",
-         'return cached[1], cached[2], cached[3]', 'return cached[1], cached[2], cached[2] ~= 0',
+         'return columns[1][cached], columns[2][cached], columns[3][cached]', 'return columns[1][cached], columns[2][cached], columns[2][cached] ~= 0',
          "zero-valued observed record was confused with missing"),
     ]
     for name, module, script, before, after, expected in helpers:
@@ -144,7 +151,7 @@ def main():
     lua = str(Path(lua).resolve())
     with temporary_tree() as root:
         isolated_sources(root)
-        for script in ("test_tiger_sentence_incremental.lua", "test_rime_contract.lua", "test_sentence_safety.lua", "test_sentence_learning.lua", "test_review_regressions.lua", "test_ngram_reader.lua"):
+        for script in ("test_tiger_sentence_incremental.lua", "test_rime_contract.lua", "test_sentence_safety.lua", "test_sentence_learning.lua", "test_review_regressions.lua", "test_ngram_reader.lua", "test_memory.lua"):
             result = execute(lua, root, script)
             print(result.stdout, end="", flush=True)
             result.check_returncode()

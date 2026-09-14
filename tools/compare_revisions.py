@@ -35,12 +35,16 @@ def main():
     parser.add_argument("--require-model", action="store_true")
     parser.add_argument("--cases", type=int, default=20)
     parser.add_argument("--report", type=Path)
+    parser.add_argument("--memory-profile", choices=("balanced", "compact"), default="balanced")
+    parser.add_argument("--trim-every", type=int, default=0, help="Exercise memory-pressure hook between snapshot generations")
     args = parser.parse_args()
     lua = shutil.which(args.lua)
     if not lua:
         parser.error("Lua interpreter not found")
     if args.require_model and not args.model:
         parser.error("--require-model requires an explicit --model (a synthetic fixture is not a production model)")
+    if args.trim_every < 0:
+        parser.error("--trim-every must be nonnegative")
     if args.cases < 0 or args.cases > 1000:
         parser.error("--cases must be between 0 and 1000")
     baseline, candidate = args.baseline.resolve(), args.candidate.resolve()
@@ -78,7 +82,7 @@ def main():
                     shutil.copy2(model, destination)
             output = work / (label + ".snapshot")
             with output.open("wb") as stream:
-                result = subprocess.run([lua, str(probe), str(tree), str(data), "mobile" if model else "none", str(args.cases)],
+                result = subprocess.run([lua, str(probe), str(tree), str(data), "mobile" if model else "none", str(args.cases), args.memory_profile, str(args.trim_every)],
                                         stdout=stream, stderr=subprocess.PIPE, timeout=600)
             if result.returncode:
                 raise RuntimeError(f"{label} probe failed:\n{result.stderr.decode('utf-8', errors='replace')}")
@@ -103,8 +107,10 @@ def main():
                   "candidate_module_sha256": digest(candidate / "lua/tiger_sentence.lua"),
                   "model_source": "synthetic" if args.fixture else "explicit-file" if model else "none",
                   "model_sha256": digest(model) if model else None,
-                  "random_cases": args.cases, "baseline": stats[0], "candidate": stats[1],
-                  "snapshot_sha256": [digest(p) for p in outputs], "first_mismatch": mismatch}
+                  "random_cases": args.cases, "memory_profile": args.memory_profile, "trim_every": args.trim_every, "baseline": stats[0], "candidate": stats[1],
+                  "snapshot_sha256": [digest(p) for p in outputs], "first_mismatch": mismatch,
+                  "source_manifests": {label: {str(p.relative_to(tree)): digest(p) for p in sorted((tree / "lua").glob("*.lua"))}
+                                       for label, tree in (("baseline", baseline), ("candidate", candidate))}}
         text = json.dumps(report, ensure_ascii=False, indent=2)
         print(text)
         if args.report:

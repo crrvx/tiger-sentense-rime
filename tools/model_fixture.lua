@@ -1,11 +1,15 @@
 -- A small valid paged KN fixture with independent float32-rounded tables.
 -- No text corpus or production-model quality claim is associated with it.
-local function make(path)
+local function make(path, extra_tokens)
     assert(string.pack and string.unpack, "binary fixtures require Lua 5.3+")
     local stride, shift = 16, 2097152
     local function f32(v)return (string.unpack("<f",string.pack("<f",v)))end
     local tokens={0,2,3,65,127,128,2047,2048,0x4e00,0x4e59,0x4eba,0x4f60,0x5929,
         0x597d,0x6211,0x662f,0x7532,0x7684,0x8bdd,0x9fff,0x10000,0x1f600,0x20000,0x10ffff}
+    -- Optional larger fixture exercises the second-level sparse index and its
+    -- page boundaries; the default fixture remains byte-for-byte unchanged.
+    for i=1,(extra_tokens or 0) do tokens[#tokens+1]=0x30000+i end
+    if extra_tokens then table.sort(tokens) end
     local uni,bi,tri={}, {}, {}
     local uni_bytes={}
     for i,ch in ipairs(tokens)do

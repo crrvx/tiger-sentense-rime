@@ -2,6 +2,7 @@
 -- decoding uses only immutable in-memory indexes. No Windows receipt is implied.
 local M = {}
 local memo = require("tiger_sentence_cache")
+local MATERIALIZED_CODE_LIMIT = 256
 local function chars(text)
     local result = {}
     for c in text:gmatch("[%z\1-\127\194-\244][\128-\191]*") do
@@ -185,7 +186,14 @@ local function materialize(index, code)
             for ctx, value in pairs(s.exact) do p.exact[ctx] = math.max(p.exact[ctx] or 0, value) end
         end
     end
-    index.cache[code] = result
+    -- Only derived scores are evicted; events and immutable aggregates remain.
+    -- Otherwise querying many distinct 16-character corrections materializes
+    -- every prefix table for the entire journal until the next score epoch.
+    if not index._materialized then
+        index._materialized = memo.new(MATERIALIZED_CODE_LIMIT)
+        index._materialized.values = index.cache
+    end
+    memo.put(index._materialized, code, result)
     return result
 end
 local function update_index(index, accepted, events, now)
@@ -229,6 +237,11 @@ end
 -- owners release unused epochs, while each surviving owner's caches are bounded.
 local code_windows = setmetatable({}, {__mode="k"})
 local prefix_queries = setmetatable({}, {__mode="k"})
+function M.trim_caches(index)
+    if not index then return end
+    if index.partitions then index.cache, index._materialized = {}, nil end
+    prefix_queries[index], code_windows[index.codes] = nil, nil
+end
 local function code_window(codes, code)
     local cache = code_windows[codes]
     if not cache then cache = memo.new(2048); code_windows[codes] = cache end
