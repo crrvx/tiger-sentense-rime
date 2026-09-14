@@ -81,6 +81,9 @@
 
 - schema 配置 `tiger_sentence/high_freq_limit`（默认 `1500`）：常用字
   （字频前 N）只保留最优码；`0` 全部放开；负数按 `0`。
+  带方案的入口独立读取该方案配置，缺失、不可读或返回非数值时按默认 `1500`，
+  不继承上一方案的值；内部无方案参数的解码/诊断调用只复用当前词库。
+  相同有效限制不重建词库；`apply_high_freq_limit(nil)` 不修改限制或缓存。
 - schema 配置 `tiger_sentence/min_retained_raw_length`（默认 `0`）：
   自动上屏最少保留编码数，概率型提交仍永远不少于三键。
 - 导入其它形码码表：直接替换 `tiger_sentence.codes.txt`（编码仅限拉丁
