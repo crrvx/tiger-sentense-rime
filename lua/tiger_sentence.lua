@@ -362,6 +362,7 @@ local function build_lexicon_index(entries, character_ranks, high_freq_limit, wh
 
     return {
         codes = filtered,
+        character_codes = codes_by_character,
         lengths = lengths,
         max_code_len = max_len,
         proper_code_prefixes = prefixes
@@ -407,6 +408,7 @@ local function rebuild_lexicon(limit)
     lexicon_state.built = true
     lexicon_state.high_freq_limit = limit
     lexicon_state.codes = index.codes
+    lexicon_state.character_codes = index.character_codes
     lexicon_state.lengths = index.lengths
     lexicon_state.max_code_len = index.max_code_len
     lexicon_state.proper_code_prefixes = index.proper_code_prefixes
@@ -3486,6 +3488,7 @@ local function processor(key_event, env)
 end
 
 local function translator(input, seg, env)
+    if input:sub(1, 1) == "`" then return end -- backtick pinyin reverse-lookup segment
     configure_memory(env)
     ensure_lexicon(env)
     local context = env.engine.context
@@ -3669,6 +3672,25 @@ M.buffer_filter = function(input, env)
     local buffered = buffered_text(env.engine.context) ~= ""
     for candidate in input:iter() do
         if not buffered or candidate.type == "sentence_buffered" then yield(candidate) end
+    end
+end
+-- 反查段候选注释:该单字在整句码表中的全部编码,源序即名次序。
+local function reverse_comment(text)
+    local codes = lexicon_state.built and lexicon_state.character_codes[text]
+    if not codes or #codes == 0 then return nil end
+    return " " .. table.concat(codes, " / ")
+end
+M.reverse_comment = reverse_comment
+M.reverse_comment_filter = function(input, env)
+    local composition = env.engine.context.composition
+    local seg = composition and not composition:empty() and composition:back() or nil
+    local active = seg and seg:has_tag("reverse_lookup")
+    for candidate in input:iter() do
+        if active then
+            local comment = reverse_comment(candidate.text)
+            if comment then candidate.comment = comment end
+        end
+        yield(candidate)
     end
 end
 M.learning = learning
