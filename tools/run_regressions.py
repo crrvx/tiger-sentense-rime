@@ -48,6 +48,7 @@ def isolated_sources(destination):
     for pattern in ("*.txt", "*.yaml", "rime.lua"):
         for path in PACK.glob(pattern):
             shutil.copy2(path, destination / path.name)
+    shutil.copy2(ROOT / "tools/test_high_freq_limit.lua", destination / "tools/test_high_freq_limit.lua")
 
 
 def execute(lua, root, script, override=None):
@@ -64,6 +65,13 @@ def execute(lua, root, script, override=None):
 def negative_controls(lua, root):
     source = (root / "lua/tiger_sentence.lua").read_text(encoding="utf-8")
     variants = [
+        ("internal-limit", "test_high_freq_limit.lua",
+         'if not schema then', 'if false then',
+         "First decode reset explicit high_freq_limit zero"),
+        ("schema-default", "test_high_freq_limit.lua",
+         'if limit == nil then limit = default_high_freq_limit end',
+         'if limit == nil then limit = lexicon_state.high_freq_limit or default_high_freq_limit end',
+         "Schema with missing/invalid key inherited previous limit"),
         ("caret-insert", "test_rime_contract.lua",
          'if caret ~= #live_before then', 'if false then',
          "Insertion invalidated wrong lock range"),
@@ -109,6 +117,9 @@ def main():
             result = execute(lua, root, script)
             print(result.stdout, end="", flush=True)
             result.check_returncode()
+        result = execute(lua, root, "test_high_freq_limit.lua")
+        print(result.stdout, end="", flush=True)
+        result.check_returncode()
         if args.negative_control:
             negative_controls(lua, root)
 
