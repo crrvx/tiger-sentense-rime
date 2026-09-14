@@ -5,6 +5,8 @@ package.path=source.."/lua/?.lua;"..package.path
 rime_api={get_user_data_dir=function()return data end}
 os.time=function()return 1800000000 end
 local sentence=require("tiger_sentence")
+if arg[5] and sentence.set_memory_profile then assert(sentence.set_memory_profile(arg[5])) end
+local trim_every=tonumber(arg[6]) or 0
 sentence.ensure_lexicon(nil);sentence.set_model_enabled(mode~="none")
 local model=sentence.model_status()
 assert(mode=="none" or (model.loaded and model.format=="TCSKNM02"),"required paged model was not loaded")
@@ -49,6 +51,7 @@ local function candidates(items,display)
 end
 local count,cpu=0,0
 local function capture(label,raw,evidence,required,lock)
+    if trim_every > 0 and count % trim_every == 0 and sentence.trim_memory then sentence.trim_memory() end
     local started=os.clock()
     local result=sentence.decode(raw,evidence,required or "",lock)
     cpu=cpu+(os.clock()-started)

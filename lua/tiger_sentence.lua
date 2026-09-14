@@ -54,12 +54,6 @@ end
 local reset_decode_cache -- forward declaration; assigned below
 local clear_model_dependent_caches -- forward declaration; assigned below
 
-local function clear_table(values)
-    for key in pairs(values) do
-        values[key] = nil
-    end
-end
-
 -- Plain-text lexicon data.
 --   tiger_sentence.codes.txt             "text\tcode", line order = rank
 --   tiger_sentence.char_ranks.txt         one character per line, in rank order
@@ -741,19 +735,52 @@ local function beam_limit_at(raw_length)
     return beam_width
 end
 
+local function clear_lookup_caches()
+    -- Removing entries does not shrink Lua table capacity. Replace the tables
+    -- so memory-pressure/model-reset paths can actually release their storage.
+    logp_cache, logp_cache_keys, logp_cache_next = {}, {}, 1
+    observed_cache, observed_cache_keys, observed_cache_next = {}, {}, 1
+    isolation_cache, isolation_cache_keys, isolation_cache_next = {}, {}, 1
+end
+
 clear_model_dependent_caches = function()
-    clear_table(logp_cache)
-    clear_table(logp_cache_keys)
-    logp_cache_next = 1
-    clear_table(observed_cache)
-    clear_table(observed_cache_keys)
-    observed_cache_next = 1
-    clear_table(isolation_cache)
-    clear_table(isolation_cache_keys)
-    isolation_cache_next = 1
+    clear_lookup_caches()
     if reset_decode_cache then
         reset_decode_cache()
     end
+end
+
+-- Profiles change memoization capacity only. They never change the Beam,
+-- scoring policy, candidate pool, learning epoch, or a live composition.
+local memory_profiles = {
+    balanced = {page_bytes=8*1024*1024, context_entries=16384, bigram_entries=8192,
+        index_pages=64, logp_entries=32768, observed_entries=32768, isolation_entries=8192},
+    compact = {page_bytes=2*1024*1024, context_entries=4096, bigram_entries=2048,
+        index_pages=16, logp_entries=8192, observed_entries=4096, isolation_entries=2048}
+}
+local active_memory_profile = "balanced"
+local function set_memory_profile(name)
+    if name == nil then return false end
+    local limits = memory_profiles[name]
+    if not limits then return false end
+    if name == active_memory_profile then return true end
+    active_memory_profile = name
+    logp_cache_limit, observed_cache_limit = limits.logp_entries, limits.observed_entries
+    ISOLATION_CACHE_ENTRIES = limits.isolation_entries
+    clear_lookup_caches()
+    if kn_model and kn_model.configure_cache then kn_model.configure_cache(limits) end
+    return true
+end
+local function configure_memory(env)
+    local schema = env and env.engine and env.engine.schema
+    -- Like high_freq_limit, a schema-less decoder call must not reset an
+    -- explicit frontend profile. Only actual schema entries select defaults.
+    if not env or not schema then return end
+    local ok, name = pcall(function()
+        return schema.config:get_string("tiger_sentence/memory_profile")
+    end)
+    if not ok or not memory_profiles[name] then name = "balanced" end
+    set_memory_profile(name)
 end
 
 -- Only committed-prefix state must be visible to both the processor and
@@ -939,7 +966,7 @@ local function ensure_kn()
     if kn_model ~= false then
         return kn_model
     end
-    kn_model, kn_load_error = kn_reader.try_load()
+    kn_model, kn_load_error = kn_reader.try_load(memory_profiles[active_memory_profile])
     kn_model = kn_model or nil
     return kn_model
 end
@@ -1031,6 +1058,17 @@ local function candidate_is_single(candidate)
 end
 
 local function eligible_candidates(candidates, selected_rank, whole_input_edge, allow_duplicate_single)
+    -- Most code lists contain one entry. Reuse that immutable list instead of
+    -- storing an identical one-element _duplicate/_rank_N table on every code.
+    if #candidates == 1 then
+        local candidate = candidates[1]
+        if selected_rank > 0 then
+            if candidate.r == selected_rank then return candidates end
+        elseif whole_input_edge or candidate.r == 1 or
+            (allow_duplicate_single and candidate_is_single(candidate)) then
+            return candidates
+        end
+    end
     if selected_rank == 0 then
         if whole_input_edge then
             return candidates
@@ -1953,6 +1991,7 @@ end
 
 local function emit(raw, states, length, include_early_commit, required_text_prefix)
     local completed = dedup_limit(states[length], beam_limit_at(length))
+    states[length] = completed
     local all_candidates = {}
     for i = 1, #completed do
         all_candidates[i] = evaluate_state(completed[i])
@@ -3155,6 +3194,7 @@ local function processor(key_event, env)
         return 2
     end
     if env._tiger_options then env._tiger_options.sync() end
+    configure_memory(env)
     ensure_lexicon(env)
     local context = env.engine.context
     set_allow_duplicate_single(context)
@@ -3429,6 +3469,7 @@ local function processor(key_event, env)
 end
 
 local function translator(input, seg, env)
+    configure_memory(env)
     ensure_lexicon(env)
     local context = env.engine.context
     local state = sentence_state(context, env)
@@ -3572,6 +3613,26 @@ M.performance_status = function()
         last = performance.last
     }
 end
+-- Does not load the model, advance a learning epoch, or force a collection.
+M.memory_status = function()
+    return {profile=active_memory_profile, lua_kib=collectgarbage("count"),
+        logp_entries=#logp_cache_keys, logp_limit=logp_cache_limit,
+        observed_entries=#observed_cache_keys, observed_limit=observed_cache_limit,
+        isolation_entries=#isolation_cache_keys, isolation_limit=ISOLATION_CACHE_ENTRIES,
+        model=kn_model and kn_model.cache_status and kn_model.cache_status() or nil}
+end
+M.set_memory_profile = set_memory_profile
+M.configure_memory = configure_memory
+-- Host opt-in hook; call between key events on the owning Lua thread. Do not
+-- close the model or drop active Beam/locks/evidence/learning transactions.
+-- A full collection is deliberately explicit, never performed on every key.
+M.trim_memory = function()
+    clear_lookup_caches()
+    if kn_model and kn_model.trim_caches then kn_model.trim_caches() end
+    learning.trim_caches(learning_index)
+    collectgarbage("collect")
+    return M.memory_status()
+end
 M.processor = processor
 M.translator = translator
 M.buffer_filter = function(input, env)
@@ -3586,7 +3647,7 @@ M.set_learning_for_test = function(index, mode)
     reset_decode_cache()
 end
 M.processor_component = {
-    init = function(env) M.options.init(env) end,
+    init = function(env) configure_memory(env); M.options.init(env) end,
     func = processor,
     fini = function(env)
         M.options.fini(env)
