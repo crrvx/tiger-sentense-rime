@@ -3674,11 +3674,26 @@ M.buffer_filter = function(input, env)
         if not buffered or candidate.type == "sentence_buffered" then yield(candidate) end
     end
 end
--- 反查段候选注释:该单字在整句码表中的全部编码,源序即名次序。
+-- 反查段候选注释:单字显示全部编码(源序即名次序);词组逐字显示"字:码组",
+-- 码表外字符标记为"字:?"。
 local function reverse_comment(text)
-    local codes = lexicon_state.built and lexicon_state.character_codes[text]
-    if not codes or #codes == 0 then return nil end
-    return " " .. table.concat(codes, " / ")
+    if not lexicon_state.built then return nil end
+    local parts, chars = {}, 0
+    for ch in text:gmatch("[%z\1-\127\194-\244][\128-\191]*") do
+        chars = chars + 1
+        local codes = lexicon_state.character_codes[ch]
+        if chars == 1 and #text == #ch then
+            if not codes or #codes == 0 then return nil end
+            return " " .. table.concat(codes, " / ")
+        end
+        if codes and #codes > 0 then
+            parts[#parts + 1] = ch .. ":" .. table.concat(codes, "/")
+        else
+            parts[#parts + 1] = ch .. ":?"
+        end
+    end
+    if chars == 0 then return nil end
+    return " " .. table.concat(parts, " ")
 end
 M.reverse_comment = reverse_comment
 M.reverse_comment_filter = function(input, env)

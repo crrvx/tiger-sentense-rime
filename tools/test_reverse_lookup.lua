@@ -43,8 +43,21 @@ end
 check(multi,'no multi-code character found for ordering coverage')
 check(#expected[multi]>1,'multi-code character lost codes')
 
--- 未收录文本与多字词:无注释。
-check(sentence.reverse_comment("Z")==nil,'non-entry text must have no comment')
+-- 未收录单字:无注释。
+check(sentence.reverse_comment("Z")==nil,'non-entry character must have no comment')
+-- 词组:逐字"字:码组",码表外字符标 ?;期望值由独立解析结果拼装。
+local function word_comment(word)
+    local parts={}
+    for ch in word:gmatch("[%z\1-\127\194-\244][\128-\191]*") do
+        local codes=expected[ch]
+        if codes and #codes>0 then
+            parts[#parts+1]=ch..":"..table.concat(codes,"/")
+        else
+            parts[#parts+1]=ch..":?"
+        end
+    end
+    return " "..table.concat(parts," ")
+end
 local sample_word
 for line in content:gmatch("[^\n]+") do
     local word,code=line:match("^(%S+)%s+(%S+)")
@@ -55,7 +68,12 @@ for line in content:gmatch("[^\n]+") do
     end
 end
 check(sample_word,'no multi-character word found in codes table')
-check(sentence.reverse_comment(sample_word)==nil,'word candidates must not be annotated')
+check(sentence.reverse_comment(sample_word)==word_comment(sample_word),
+    'word comment mismatch: '..sample_word)
+local mixed=order[1].."Z"
+check(sentence.reverse_comment(mixed)==word_comment(mixed),
+    'partial-code word comment mismatch: '..mixed)
+check(sentence.reverse_comment(mixed):find("Z:?"),'missing character not marked')
 
-print(string.format('OK reverse lookup comments: %d checks, %d single-character entries, multi-code sample: %s',
-    checks, #order, multi))
+print(string.format('OK reverse lookup comments: %d checks, %d single-character entries, multi-code sample: %s, word sample: %s',
+    checks, #order, multi, sample_word))
