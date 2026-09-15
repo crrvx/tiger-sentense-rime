@@ -2364,8 +2364,15 @@ local function decode(raw_code, include_early_commit, required_text_prefix, lock
                 local edge_text = locked.text:sub(seed.text_length + 1, t)
                 local candidate, selected_rank, code_length = ranking_prior.resolve_locked_edge(
                     raw, seed.raw_length, r, edge_text)
-                if not candidate then return {} end
-                local chars = candidate_chars(candidate)
+                -- Text-only Backspace can shorten an already confirmed
+                -- multi-character edge while deliberately retaining its raw
+                -- boundary (for example 团圆/cd -> 团/cd).  Such an opaque
+                -- lock was valid before ranking priors existed, so replay it
+                -- with legacy-neutral code evidence instead of rejecting the
+                -- whole suffix. Exact surviving edges still recover their
+                -- canonical-code and rare-character metadata.
+                local chars = candidate and candidate_chars(candidate) or
+                    utf_chars(edge_text)
                 local protect_primary_rare =
                     ranking_prior.canonical_isolation_factor < 1.0
                 local item = { text = locked.text:sub(1, t), previous = seed, edge_chars = chars,
@@ -2377,9 +2384,9 @@ local function decode(raw_code, include_early_commit, required_text_prefix, lock
                     -- A confirmed prefix keeps the historical neutral rank;
                     -- the user's lock, not its former menu rank, is decisive.
                     max_rank = 1,
-                    edge_primary_single = protect_primary_rare and #chars == 1 and
+                    edge_primary_single = candidate and protect_primary_rare and #chars == 1 and
                         (candidate.primary_single or selected_rank > 0),
-                    edge_code_length = protect_primary_rare and code_length or nil }
+                    edge_code_length = candidate and protect_primary_rare and code_length or nil }
                 for _, ch in ipairs(chars) do
                     item.score = item.score + logp(item.prev2, item.prev1, ch) + emitted_character_reward
                     if has_supplements then
@@ -2391,7 +2398,7 @@ local function decode(raw_code, include_early_commit, required_text_prefix, lock
                     item.prev2, item.prev1 = item.prev1, ch
                 end
                 local code_reward_added = 0.0
-                if ensure_kn() and ranking_prior.canonical_code_reward > 0.0 and
+                if candidate and ensure_kn() and ranking_prior.canonical_code_reward > 0.0 and
                     selected_rank == 0 and candidate.primary_single and #chars == 1 then
                     code_reward_added = ranking_prior.canonical_code_reward * code_length
                     item.code_score = item.code_score + code_reward_added

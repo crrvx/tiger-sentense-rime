@@ -27,7 +27,7 @@ Bloom filter 不存词文本和词频。假阳性估算为 `2.11e-5`，且一次
 [`LEXICAL_PRIOR_ATTRIBUTION.md`](LEXICAL_PRIOR_ATTRIBUTION.md)。新增的两个主要
 运行时文件为 150,032 字节 filter 与 5,319 字节 Lua reader，合计 155,351 字节；
 再计入主解码器与 schema 的净增源码，本次未压缩运行时文件总增量为
-169,234 字节（约 165.3 KiB）。
+169,804 字节（约 165.8 KiB）。
 
 ## 定向差异集消融
 

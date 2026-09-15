@@ -174,6 +174,16 @@ for _, candidate in ipairs(sentence.decode_full("ueot")) do
         "lexical prior changed no-model fallback")
 end
 
+-- Deleting inside an already buffered multi-character edge keeps its opaque
+-- raw boundary. It no longer has canonical evidence, but must remain usable as
+-- locked context when typing resumes.
+sentence.reset_decode_cache()
+local opaque_lock = sentence.decode("ccot", false, "燃", {
+    raw = "cc", text = "燃", boundaries = "2,3;"
+})
+check(opaque_lock[1] and opaque_lock[1].text == "燃是",
+    "partially deleted multi-character lock rejected resumed input")
+
 if created_fixture then assert(os.remove(fixture_path)) end
 
 print(string.format(
