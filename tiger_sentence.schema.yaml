@@ -60,6 +60,8 @@ menu:
   page_size: 5
 
 tiger_sentence:
+  # Default distribution profile; override with balanced in a custom patch if needed.
+  memory_profile: compact
   # First-use defaults only. Explicit choices persist across input sessions.
   option_defaults:
     tiger_sentence_early_commit: true

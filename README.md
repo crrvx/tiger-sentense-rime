@@ -1,5 +1,7 @@
 # 虎整句 · tiger-sentense-rime
 
+方案默认采用 `compact` 内存档，包含暂存后长句尾部回删缓存复用及纯暂存文字回删优化。可在 `tiger_sentence.custom.yaml` 的 `patch` 中设置 `"tiger_sentence/memory_profile": balanced` 切换为较大缓存档。
+
 基于虎码（虎整句）码表的 Rime 独立整句输入方案：纯 Lua 变长整句解码，
 可选本地 n-gram 语言模型排序，输入行为与 TigerClaw（虎爪）Windows 版对齐。
 不依赖任何 Windows 组件，可在小狼毫（Weasel）、Linux ibus-rime/fcitx-rime 等
