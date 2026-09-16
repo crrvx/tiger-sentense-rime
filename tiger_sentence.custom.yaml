@@ -1,0 +1,8 @@
+patch:
+  # 禁用 Rime 内置英文(ascii)模式的全部切换键
+  ascii_composer/switch_key:
+    Caps_Lock: noop
+    Shift_L: noop
+    Shift_R: noop
+  # 从状态菜单移除「中/西」档
+  switches/@0: null
