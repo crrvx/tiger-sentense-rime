@@ -1,6 +1,7 @@
 -- Run this *same* probe in separate Lua processes for old and new sources.
 -- Stable behavior-only serialization deliberately ignores cache/layout fields.
 local source, data, mode, random_cases = arg[1], arg[2], arg[3], tonumber(arg[4]) or 20
+local ignore_early_evidence = arg[8] == "ignore-early-evidence"
 package.path=source.."/lua/?.lua;"..package.path
 rime_api={get_user_data_dir=function()return data end}
 os.time=function()return 1800000000 end
@@ -69,10 +70,12 @@ local function capture(label,raw,evidence,required,lock)
     local menu=candidates(result,true)
     local pool=candidates(result._confidence_candidates,false)
     local snapshot={label=label,raw=raw,menu=menu,pool=pool,paths=path_nodes,
-        learning=result.learning_affected or false,truncated=result._completed_truncated or false,
-        evidence={prefixes=prefixes,proposal=e.proposal or "",share=e.proposal_share or 0,raw_lengths=e.raw_lengths or {},
+        learning=result.learning_affected or false,truncated=result._completed_truncated or false}
+    if not ignore_early_evidence then
+        snapshot.evidence={prefixes=prefixes,proposal=e.proposal or "",share=e.proposal_share or 0,raw_lengths=e.raw_lengths or {},
             truncated=e.confidence_truncated or false,neutral_tail=e.neutral_incomplete_tail or false,
-            merged_tail=e.merged_incomplete_tail or false,neutral_low=e.neutral_low_confidence or false}}
+            merged_tail=e.merged_incomplete_tail or false,neutral_low=e.neutral_low_confidence or false}
+    end
     io.write(canonical(snapshot),"\n");count=count+1
     return result
 end

@@ -57,10 +57,27 @@ for i=1,10000 do check(learning.prefix_score(indexed,"test","ab","甲",tostring(
 sentence.set_learning_for_test(index,"test")
 local result=sentence.decode("ab",true)
 check(result[1].text=="疒" and result.learning_affected,"learning ranks a legal whole edge")
-check(#result.early_commit_evidence.prefixes==0,"learning cannot create confidence")
+check(#result.early_commit_evidence.prefixes>0,"learning now participates in ordinary early-commit evidence")
+check(math.abs((result[1].early_commit_confidence_score or result[1].confidence_score)-result[1].confidence_score)<1e-12,
+    "first correction contributes zero early confidence")
 check(sentence.capture_empty_code_candidate("ab","")==nil,"learning cannot create empty-code proof")
 local full=sentence.decode_full("ab",true)
 check(result[1].score==full[1].score,"learned incremental full parity")
+local twice=learning.build({event("ab","疒"),event("ab","疒")},now)
+sentence.set_learning_for_test(twice,"test")
+local second=sentence.decode("ab",true)
+check((second[1].early_commit_confidence_score or second[1].confidence_score)>second[1].confidence_score,
+    "second stable observation adds partial early confidence")
+local thrice=learning.build({event("ab","疒"),event("ab","疒"),event("ab","疒")},now)
+sentence.set_learning_for_test(thrice,"test")
+local mature=sentence.decode("ab",true)
+check((mature[1].early_commit_confidence_score or mature[1].confidence_score)>
+    (second[1].early_commit_confidence_score or second[1].confidence_score),
+    "third stable observation adds more early confidence")
+check(learning.early_commit_maturity(9)==0 and
+    math.abs(learning.early_commit_maturity(9+2*math.log(2))-0.5)<1e-9 and
+    learning.early_commit_maturity(9+2*math.log(3))>0.999999,
+    "learning maturity maps first/second/third observations to 0/0.5/1")
 sentence.set_learning_for_test(nil,"")
 check(sentence.decode("ab")[1].text=="交","disable restores base ranking")
 
@@ -115,7 +132,9 @@ check(writes==0,"transformed commit does not learn")
 type_ot();press("Tab");press("space")
 check(writes==1 and commits[#commits]=="疒","host submission learns once")
 type_ot();check(sentence.decode("ab")[1].text=="疒","next composition uses learning")
-press("space");check(writes==1,"ordinary learned first choice is not reinforced")
+press("space");check(writes==2,"ordinary learned first choice reinforces the first stable repeat")
+type_ot();press("space");check(writes==3,"second stable repeat advances learning to full maturity")
+type_ot();press("space");check(writes==3,"fully mature top1 stops redundant reinforcement writes")
 config.enabled=false;type_ot()
 check(sentence.decode("ab")[1].text=="交","schema setting disables scoring")
 press("Escape");config.enabled=true;type_ot()
@@ -134,9 +153,9 @@ check(lock_ctx.input=="a","Tab learning keeps live raw suffix")
 sentence.processor_component.fini(lock_env)
 local reopened = dofile(repo.."/lua/tiger_sentence_learning.lua")
 local persisted = reopened.open("tiger_sentence_learning_"..learning.hash("learning-test"))
-check(persisted.count==1 and #persisted.events==1,"database restart loads one event")
+check(persisted.count==3 and #persisted.events==3,"database restart loads correction plus mature reinforcements")
 local saved=persisted.events[1]
-check(reopened.score(persisted.index,saved.mode,"ab","疒","")==9,"length-framed persistence round trip")
+check(reopened.score(persisted.index,saved.mode,"ab","疒","")>11,"length-framed persistence preserves mature score")
 check(not learning.confirm({db={update=function()error("must not write")end},count=10000}, {event("ab","乙")}),"bounded event history")
 local tap_env,tap_ctx,tap_press,tap_type,_,tap_config=host("tap-schema",false)
 local before_taps=writes
@@ -148,11 +167,11 @@ tap_type();tap_ctx:highlight(1);tap_ctx.repeat_notification=true;tap_ctx:confirm
 check(writes==before_taps+1,"non-first tap learns exactly once without Tab or space")
 tap_type();check(sentence.decode("ab")[1].text=="疒","tap changes next composition ranking")
 tap_ctx:highlight(0);tap_ctx:confirm_current_selection()
-check(writes==before_taps+1,"tapping learned first candidate does not reinforce")
+check(writes==before_taps+2,"tapping learned first candidate reinforces a stable preference")
 tap_config.enabled=false;tap_type();tap_ctx:highlight(1);tap_ctx:confirm_current_selection()
-check(writes==before_taps+1,"disabled learning ignores taps")
+check(writes==before_taps+2,"disabled learning ignores taps")
 tap_config.enabled=true;tap_type();tap_press("Tab");tap_ctx:confirm_current_selection()
-check(writes==before_taps+2,"Tab followed by tap records one correction")
+check(writes==before_taps+3,"Tab followed by tap records one correction")
 sentence.processor_component.fini(tap_env)
 -- Runtime partitions must match an independent full journal replay, including
 -- competing choices, generalization, cap/decay, old snapshots and clock jumps.

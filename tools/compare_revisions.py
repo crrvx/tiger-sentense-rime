@@ -40,6 +40,8 @@ def main():
     parser.add_argument("--trim-every", type=int, default=0, help="Exercise memory-pressure hook between snapshot generations")
     parser.add_argument("--legacy-ranking", action="store_true",
                         help="Disable compact ranking priors when a source exposes the test hook")
+    parser.add_argument("--ignore-early-evidence", action="store_true",
+                        help="Keep strict decoder/menu/path parity while omitting early-commit evidence from old/new snapshots")
     args = parser.parse_args()
     lua = shutil.which(args.lua)
     if not lua:
@@ -88,7 +90,8 @@ def main():
                 result = subprocess.run([lua, str(probe), str(tree), str(data),
                                          "mobile" if model else "none", str(args.cases),
                                          args.memory_profile, str(args.trim_every),
-                                         "legacy-ranking" if args.legacy_ranking else "current-ranking"],
+                                         "legacy-ranking" if args.legacy_ranking else "current-ranking",
+                                         "ignore-early-evidence" if args.ignore_early_evidence else "full-snapshot"],
                                         stdout=stream, stderr=subprocess.PIPE, timeout=600)
             if result.returncode:
                 raise RuntimeError(f"{label} probe failed:\n{result.stderr.decode('utf-8', errors='replace')}")
@@ -115,6 +118,7 @@ def main():
                   "model_sha256": digest(model) if model else None,
                   "random_cases": args.cases, "memory_profile": args.memory_profile,
                   "trim_every": args.trim_every, "legacy_ranking": args.legacy_ranking,
+                  "ignore_early_evidence": args.ignore_early_evidence,
                   "baseline": stats[0], "candidate": stats[1],
                   "snapshot_sha256": [digest(p) for p in outputs], "first_mismatch": mismatch,
                   "source_manifests": {label: {str(p.relative_to(tree)): digest(p) for p in sorted(
