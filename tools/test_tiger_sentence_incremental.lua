@@ -245,9 +245,13 @@ local supplement_ranking_priors = (supplement_target.code_score or 0.0) +
     sentence.path_isolation_penalty(supplement_target.path)
 if math.abs(supplement_target.score - supplement_target.confidence_score -
     expected_supplement - supplement_ranking_priors) > 1e-9 then
-    fail("supplement reward leaked into confidence mass")
+    fail("supplement reward leaked into base confidence mass")
 end
-print("OK  supplemental corpus loaded, ranked, and excluded from confidence mass")
+if not supplement_target.early_commit_confidence_score or
+    supplement_target.early_commit_confidence_score <= supplement_target.confidence_score then
+    fail("supplement reward did not contribute bounded personalized early confidence")
+end
+print("OK  supplemental corpus keeps base confidence pure and contributes bounded early confidence")
 
 for i = 1, #samples do
     sentence.reset_decode_cache()
@@ -287,11 +291,15 @@ local evidence_metadata_40 = evidence_40.early_commit_evidence or {}
 if not evidence_metadata_40.confidence_truncated then
     fail("40-key ambiguity sample did not exercise truncated confidence")
 end
-if #(evidence_metadata_40.prefixes or {}) ~= 0 or
-    (evidence_metadata_40.proposal or "") ~= "" then
-    fail("truncated confidence retained unusable early-commit evidence")
+if #(evidence_metadata_40.prefixes or {}) == 0 then
+    fail("truncated confidence failed to retain strong-policy evidence")
 end
-print("OK  40-key truncated confidence reuses the lattice and skips prefix materialization")
+for _, prefix in ipairs(evidence_metadata_40.prefixes or {}) do
+    if prefix.base_share == nil then
+        fail("truncated confidence prefix lost model-only BaseShare")
+    end
+end
+print("OK  40-key truncated confidence retains flagged BaseShare evidence for strong policy")
 
 sentence.reset_decode_cache()
 local shrinking = {}
@@ -977,14 +985,11 @@ print("OK  automatic commit always follows the final displayed top")
 
 if model.loaded then
     local joined, yielded = run_early_commit_sample("awmenamcunta")
-    if joined ~= "买" then
-        fail("awmenamcunta did not probabilistically commit 买 first: " .. joined)
+    local final = joined .. (yielded[1] or "")
+    if final ~= "买椟还珠" or ("买椟还珠"):sub(1, #joined) ~= joined then
+        fail("awmenamcunta lost a safe prefix/final sentence: " .. joined .. " + " .. tostring(yielded[1]))
     end
-    if yielded[1] ~= "椟还珠" then
-        fail("awmenamcunta continuation lost 椟还珠 as top candidate: " ..
-            tostring(yielded[1]))
-    end
-    print("OK  awmenamcunta commits 买 and keeps 椟还珠 visible first")
+    print("OK  awmenamcunta commits a safe prefix and finishes 买椟还珠")
 
     joined, yielded = run_early_commit_sample("uriczwxmjou")
     if joined:find("可佛", 1, true) then

@@ -69,8 +69,10 @@ do
     expand("ot",states,0,2)
     check(#states[2]>0 and states[2]._truncated,"Descendant lost ancestor truncation")
     local result=emit("ot",states,2,true,"")
-    check(result.early_commit_evidence.confidence_truncated and result.early_commit_evidence.proposal=="",
-        "Descendant published confidence after lost search mass")
+    check(result.early_commit_evidence.confidence_truncated and
+        #result.early_commit_evidence.prefixes>0 and
+        result.early_commit_evidence.prefixes[1].base_share~=nil,
+        "Descendant truncation must stay flagged while retaining model-only BaseShare")
     cases=cases+1
 end
 -- A ranking-only top 20 can hide the dominant dissent in confidence space.

@@ -688,15 +688,26 @@ local ranking_prior = {
     canonical_isolation_min_code_length = 4,
     lexical = require("tiger_sentence_lexical")
 }
-local early_commit_minimum_share = 0.995
--- Two consecutive generations may confirm only when dissenting Beam mass is
--- below 0.001%; every weaker history keeps the original three-key window.
-local early_commit_strong_share = 0.99999
+local early_commit_minimum_share = 0.99
+-- Strong classification stays model-only even when personalization raises the
+-- ordinary multi-generation share.
+local early_commit_strong_share = 0.999
 local early_commit_closed_boundary_share = 0.99999
 local early_commit_required_evidence = 3
 local early_commit_required_strong = 2
 local early_commit_maximum_neutral_gap = 3
 local early_commit_retained_raw_length = 3
+ranking_prior.supplement_early_commit_scale = 0.05
+ranking_prior.supplement_early_commit_cap = 0.75
+ranking_prior.personalized_early_commit_cap = 0.80
+ranking_prior.empty_code_strong_share = 0.99999
+function ranking_prior.supplement_early_commit_contribution(score)
+    return math.min(ranking_prior.supplement_early_commit_cap,
+        math.max(0, score or 0) * ranking_prior.supplement_early_commit_scale)
+end
+function ranking_prior.early_confidence(candidate)
+    return candidate.early_commit_confidence_score or candidate.confidence_score or candidate.score
+end
 -- 允许单字重码组句 defaults to on; the Rime switch only turns it off.
 local allow_duplicate_single_option = "tiger_sentence_allow_duplicate_single"
 local active_allow_duplicate_single = true
@@ -1739,12 +1750,14 @@ local function expand_range(raw, states, from_pos, length, minimum_consumed_end)
                                         score = score + whole_input_single_character_reward_added
                                     end
                                     local text = item.text .. candidate.t
-                                    local learned, potential = learning.reward(learning_index, learning_mode, raw, text, consumed_end, item)
+                                    local learned, potential, learning_early_bonus = learning.reward(
+                                        learning_index, learning_mode, raw, text, consumed_end, item)
                                     if learned > 0 or potential > 0 then learning_affected = true end
                                     add_state(states[consumed_end], {
                                         score = score + learned - (item.learning_score or 0),
                                         learning_score = learned,
                                         learning_potential = potential,
+                                        learning_early_commit_bonus = learning_early_bonus,
                                         mass_score = (item.mass_score or item.score) +
                                             score - item.score - supplement_added -
                                             whole_input_single_character_reward_added,
@@ -1815,9 +1828,14 @@ local function evaluate_state(item)
     -- legacy text-only isolation term so the heuristic cannot manufacture a
     -- high-share early commit.
     local confidence_ending_adjustment = eos_score - isolation_penalty(item.text)
+    local confidence_score = (item.mass_score or item.score) + confidence_ending_adjustment
+    local personalization = math.min(ranking_prior.personalized_early_commit_cap,
+        ranking_prior.supplement_early_commit_contribution(item.supplement_score or 0) +
+        (item.learning_early_commit_bonus or 0))
     return {
         score = item.score + ending_adjustment,
-        confidence_score = (item.mass_score or item.score) + confidence_ending_adjustment,
+        confidence_score = confidence_score,
+        early_commit_confidence_score = confidence_score + personalization,
         text = item.text,
         prev2 = item.prev2,
         prev1 = item.prev1,
@@ -1848,10 +1866,12 @@ local function add_early_commit_pool_candidate(pool, pool_index, candidate)
     end
     local previous = pool[position]
     local combined = logsumexp(previous.confidence_score, candidate.confidence_score)
+    local combined_early = logsumexp(ranking_prior.early_confidence(previous), ranking_prior.early_confidence(candidate))
     -- Copy only on a collision: completed candidates also belong to the menu
     -- and must not have their probability mass changed by dropped-tail merges.
-    local best = candidate.confidence_score > previous.confidence_score and candidate or previous
-    pool[position] = {text=best.text, confidence_score=combined, path=best.path}
+    local best = ranking_prior.early_confidence(candidate) > ranking_prior.early_confidence(previous) and candidate or previous
+    pool[position] = {text=best.text, confidence_score=combined,
+        early_commit_confidence_score=combined_early, path=best.path}
 end
 
 -- Per-(text prefix, raw boundary) evidence, mirroring
@@ -1860,31 +1880,25 @@ end
 -- otherwise closed boundary.
 local function build_prefix_evidence(pool)
     local prefixes = {}
-    if #pool == 0 then
-        return prefixes
-    end
-    local max_score = pool[1].confidence_score or pool[1].score
+    if #pool == 0 then return prefixes end
+    local base_max, early_max = pool[1].confidence_score or pool[1].score, ranking_prior.early_confidence(pool[1])
     for i = 2, #pool do
-        local score = pool[i].confidence_score or pool[i].score
-        if score > max_score then
-            max_score = score
-        end
+        base_max = math.max(base_max, pool[i].confidence_score or pool[i].score)
+        early_max = math.max(early_max, ranking_prior.early_confidence(pool[i]))
     end
-    local total = 0
-    local weights = {}
+    local base_total, early_total = 0, 0
+    local base_weights, early_weights = {}, {}
     for i = 1, #pool do
-        weights[i] = math.exp((pool[i].confidence_score or pool[i].score) - max_score)
-        total = total + weights[i]
+        base_weights[i] = math.exp((pool[i].confidence_score or pool[i].score) - base_max)
+        early_weights[i] = math.exp(ranking_prior.early_confidence(pool[i]) - early_max)
+        base_total = base_total + base_weights[i]
+        early_total = early_total + early_weights[i]
     end
-    if total <= 0 then
-        return prefixes
-    end
-    local mass_by_boundary = {}
-    local order = {}
-    local boundary_mass = {}
+    if base_total <= 0 or early_total <= 0 then return prefixes end
+    local mass_by_boundary, order, base_boundary_mass = {}, {}, {}
     for i = 1, #pool do
         local item = pool[i]
-        local weight = weights[i]
+        local base_weight, early_weight = base_weights[i], early_weights[i]
         local state = item.path
         while state do
             local prefix_text = state.text
@@ -1894,40 +1908,29 @@ local function build_prefix_evidence(pool)
             end
             if prefix_text ~= "" and #prefix_text <= #item.text then
                 local boundary = mass_by_boundary[state.raw_length]
-                if not boundary then
-                    boundary = {}
-                    mass_by_boundary[state.raw_length] = boundary
-                end
+                if not boundary then boundary = {}; mass_by_boundary[state.raw_length] = boundary end
                 local entry = boundary[prefix_text]
                 if not entry then
-                    entry = {
-                        text = prefix_text,
-                        raw_length = state.raw_length,
-                        weight = 0.0,
-                        text_char_count = utf_length(prefix_text)
-                    }
-                    boundary[prefix_text] = entry
-                    order[#order + 1] = entry
+                    entry = {text=prefix_text,raw_length=state.raw_length,base_weight=0.0,early_weight=0.0,
+                        text_char_count=utf_length(prefix_text)}
+                    boundary[prefix_text] = entry; order[#order + 1] = entry
                 end
-                entry.weight = entry.weight + weight
-                -- Raw lengths strictly increase along a path, so a candidate
-                -- can visit each boundary only once.
-                boundary_mass[state.raw_length] =
-                    (boundary_mass[state.raw_length] or 0) + weight
+                entry.base_weight = entry.base_weight + base_weight
+                entry.early_weight = entry.early_weight + early_weight
+                base_boundary_mass[state.raw_length] = (base_boundary_mass[state.raw_length] or 0) + base_weight
             end
             state = state.previous
         end
     end
     for i = 1, #order do
         local entry = order[i]
-        local boundary_share = (boundary_mass[entry.raw_length] or 0) / total
-        entry.share = entry.weight / total
+        local boundary_share = (base_boundary_mass[entry.raw_length] or 0) / base_total
+        entry.share = entry.early_weight / early_total
+        entry.base_share = entry.base_weight / base_total
         entry.boundary_share = boundary_share
         entry.boundary_closed = boundary_share >= early_commit_closed_boundary_share
-        entry.weight = nil
+        entry.base_weight, entry.early_weight = nil, nil
     end
-    -- Keep the lookup table we already built; the array preserves the exact
-    -- evidence and floating-point accumulation order used by callers.
     order._by_boundary = mass_by_boundary
     return order
 end
@@ -1974,12 +1977,9 @@ end
 local function build_early_commit_evidence(
     raw, states, completed, completed_truncated, required_text_prefix)
     performance.early_evidence_builds = performance.early_evidence_builds + 1
-    -- A truncated confidence pool is never allowed to advance or preserve an
-    -- early-commit tracker. Avoid materializing thousands of prefix records
-    -- that try_early_commit would immediately discard.
-    if completed_truncated then
-        return truncated_early_commit_evidence()
-    end
+    -- Preserve retained mass for the strong-truncated policy. The commit layer
+    -- still requires model-only strong evidence and never lets personalization
+    -- turn truncated evidence into strong evidence.
     local pool = {}
     local pool_index = {}
     local visible = {}
@@ -2015,9 +2015,7 @@ local function build_early_commit_evidence(
             end
             if added then
                 merged_incomplete_tail = true
-                if partial._truncated then
-                    return truncated_early_commit_evidence()
-                end
+                truncated = truncated or (partial._truncated or false)
             end
         end
     end
@@ -2144,8 +2142,7 @@ local function emit(raw, states, length, include_early_commit, required_text_pre
         neutral_low_confidence = false,
         confidence_truncated = completed._truncated or false
     }
-    if include_early_commit and not learning_affected then
-        -- Menu truncation must not inflate prefix/boundary confidence.
+    if include_early_commit then
         result.early_commit_evidence = build_early_commit_evidence(
             raw,
             states,
@@ -2173,6 +2170,7 @@ local function prefix_evidence_equal(left, right)
             tostring(item.raw_length)]
         if not other or other.boundary_closed ~= item.boundary_closed or
             math.abs((other.share or 0.0) - (item.share or 0.0)) > 1e-9 or
+            math.abs((other.base_share or other.share or 0.0) - (item.base_share or item.share or 0.0)) > 1e-9 or
             math.abs((other.boundary_share or 0.0) - (item.boundary_share or 0.0)) > 1e-9 then
             return false
         end
@@ -2215,6 +2213,7 @@ local function candidates_equal(left, right, display)
         if a.text ~= b.text or (display and a.segmented ~= b.segmented) or
             a.score ~= b.score or
             (a.confidence_score or a.score) ~= (b.confidence_score or b.score) or
+            ranking_prior.early_confidence(a) ~= ranking_prior.early_confidence(b) or
             (a.supplement_score or 0) ~= (b.supplement_score or 0) or
             (a.code_score or 0) ~= (b.code_score or 0) or
             (a.lexical_score or 0) ~= (b.lexical_score or 0) or
@@ -2333,7 +2332,7 @@ local function decode(raw_code, include_early_commit, required_text_prefix, lock
         end
         local states = compatible and cache.states or nil
         if states and cache.raw == raw then
-            if cache.result and not cache.result.learning_affected then
+            if cache.result then
                 cache.result.early_commit_evidence = build_early_commit_evidence(raw, states,
                     cache.result._confidence_candidates, cache.result._completed_truncated, required_text_prefix)
                 cache.includes_early_commit, cache.required = true, required_text_prefix
@@ -2407,8 +2406,10 @@ local function decode(raw_code, include_early_commit, required_text_prefix, lock
                 -- evidence is tracked separately and enters only final rank.
                 item.mass_score = item.score - item.supplement_score -
                     (seed.learning_score or 0)
-                local learned, potential = learning.reward(learning_index, learning_mode, raw, item.text, r, seed)
+                local learned, potential, learning_early_bonus = learning.reward(
+                    learning_index, learning_mode, raw, item.text, r, seed)
                 item.learning_score, item.learning_potential = learned, potential
+                item.learning_early_commit_bonus = learning_early_bonus
                 item.score = item.score + learned - (seed.learning_score or 0)
                 if learned > 0 or potential > 0 then learning_affected = true end
                 seed = item
@@ -2458,7 +2459,7 @@ local function decode(raw_code, include_early_commit, required_text_prefix, lock
         -- Only evidence is missing/different. Keep final scoring, Top-K and
         -- lazily generated display strings for this exact generation.
         local result = decode_cache.result
-        if result and not result.learning_affected then
+        if result then
             result.early_commit_evidence = build_early_commit_evidence(
                 raw, old_states, result._confidence_candidates,
                 result._completed_truncated,
@@ -2718,7 +2719,7 @@ local function strong_empty_code_candidate(candidate, eligible, visible_top, poo
             candidate_mass = candidate_mass + mass
         end
     end
-    return total > 0 and candidate_mass / total >= early_commit_strong_share
+    return total > 0 and candidate_mass / total >= ranking_prior.empty_code_strong_share
 end
 
 -- Mirrors InputMethodEngine.GetEmptyCodeAutoCommitCandidate: accept exactly
@@ -3143,7 +3144,10 @@ local function try_early_commit(env)
         return
     end
     local early_commit_evidence = decoded.early_commit_evidence or {}
-    if decoded.learning_affected or early_commit_evidence.confidence_truncated then
+    local truncated = early_commit_evidence.confidence_truncated or false
+    -- Learning can affect which paths survive the Beam. If that same pool is
+    -- truncated, even model-only BaseShare may be conditionally inflated.
+    if decoded.learning_affected and truncated then
         reset_early_evidence(state)
         save_transient_state(context, state, env)
         return
@@ -3175,9 +3179,11 @@ local function try_early_commit(env)
     local qualifying = {}
     for i = 1, #prefixes do
         local prefix = prefixes[i]
+        local base_share = prefix.base_share or prefix.share or 0
         if prefix.text and prefix.text ~= "" and
             prefix.boundary_closed and
             prefix.share >= early_commit_minimum_share and
+            (not truncated or base_share >= early_commit_strong_share) and
             prefix.raw_length > #state.committed_raw and
             #prefix.text > #state.committed_text and
             prefix.text:sub(1, #state.committed_text) == state.committed_text and
@@ -3214,7 +3220,8 @@ local function try_early_commit(env)
         end
         tracker.evidence_count = math.min(
             early_commit_required_evidence, tracker.evidence_count + 1)
-        tracker.strong_count = prefix.share >= early_commit_strong_share
+        local base_share = prefix.base_share or prefix.share or 0
+        tracker.strong_count = base_share >= early_commit_strong_share
             and math.min(early_commit_required_strong, tracker.strong_count + 1)
             or 0
         tracker.gap_count = 0
@@ -3280,8 +3287,14 @@ local function learning_stage(env, state, selected, raw, submitted_first)
         (not state.tab_pending and submitted_first)
     if baseline then
         local lock = active_lock(state)
-        local events = learning.diff(raw, baseline, selected,
-            math.max(#state.committed_raw, lock and #lock.raw or 0), live.mode)
+        local floor = math.max(#state.committed_raw, lock and #lock.raw or 0)
+        local events
+        if not state.tab_pending and submitted_first and selected.text == submitted_first.text and
+            live.store and live.store.index then
+            events = learning.reinforce(live.store.index, live.mode, raw, selected, floor)
+        else
+            events = learning.diff(raw, baseline, selected, floor, live.mode)
+        end
         for _, e in ipairs(events) do if #live.pending < 256 then live.pending[#live.pending + 1] = e end end
     end
     live.baseline = nil

@@ -316,20 +316,86 @@ local function path_context(start, text, length)
     end
     return start._learning_context
 end
+function M.early_commit_maturity(score)
+    if not score or score <= 9 then return 0 end
+    local weight = math.exp((score - 9) / 2)
+    return math.max(0, math.min(1, (weight - 1) / 2))
+end
+
+function M.early_commit_contribution(score)
+    return math.min(0.75, math.max(0, score or 0) * M.early_commit_maturity(score) * 0.075)
+end
+
 function M.reward(index, mode, raw, text, finish, previous)
     local best, potential, start = previous.learning_score or 0, 0, previous
-    if not index or #index.codes == 0 or mode == "" then return best, potential end
+    local early_bonus = previous.learning_early_commit_bonus or 0
+    if not index or #index.codes == 0 or mode == "" then return best, potential, early_bonus end
     while true do
         local t, r = start and start.text_length or 0, start and start.raw_length or 0
         local fragment = text:sub(t + 1)
         if character_count(fragment) > 16 then break end
         local code, ctx = raw:sub(r + 1, finish), path_context(start, text, t)
-        best = math.max(best, (start and start.learning_score or 0) + M.score(index, mode, code, fragment, ctx))
+        local reward = M.score(index, mode, code, fragment, ctx)
+        local candidate = (start and start.learning_score or 0) + reward
+        local candidate_bonus = math.max(previous.learning_early_commit_bonus or 0,
+            M.early_commit_contribution(reward))
+        if candidate > best or (candidate == best and candidate_bonus > early_bonus) then
+            best = candidate
+        end
+        early_bonus = math.max(early_bonus, candidate_bonus)
         potential = math.max(potential, M.prefix_score(index, mode, code, fragment, ctx))
         if not start or r == 0 then break end
         start = start.previous
     end
-    return best, potential
+    return best, potential, early_bonus
+end
+
+function M.reinforce(index, mode, raw, selected, floor)
+    if not index or not selected or not selected.path or mode == "" then return {} end
+    local map, ends, node = {[0]=0}, {}, selected.path
+    while node and (node.raw_length or 0) > 0 do
+        map[node.raw_length] = node.text_length
+        ends[#ends + 1] = node.raw_length
+        node = node.previous
+    end
+    table.sort(ends)
+    local r, t = 0, 0
+    for _, last in ipairs(ends) do
+        if last <= r or (map[last] or 0) <= t or map[last] > #selected.text then return {} end
+        r, t = last, map[last]
+    end
+    if r ~= #raw or t ~= #selected.text then return {} end
+    local points = {{raw=0, text=0}}
+    for _, last in ipairs(ends) do points[#points + 1] = {raw=last, text=map[last]} end
+    local result = {}
+    for ei = 2, #points do
+        local finish = points[ei]
+        if finish.raw > floor then
+            local best_score, best = 0, nil
+            for si = ei - 1, 1, -1 do
+                local start = points[si]
+                if start.raw >= floor then
+                    local fragment = selected.text:sub(start.text + 1, finish.text)
+                    if character_count(fragment) > 16 then break end
+                    local code = raw:sub(start.raw + 1, finish.raw):lower()
+                    local ctx = context(selected.text:sub(1, start.text))
+                    local score_value = M.score(index, mode, code, fragment, ctx)
+                    if score_value > best_score then
+                        best_score = score_value
+                        best = {code=code,text=fragment,context=ctx,raw_start=start.raw,raw_end=finish.raw,
+                            text_start=start.text,text_end=finish.text}
+                    end
+                end
+            end
+            -- 9 / 10.39 / 11.20 are approximately the first/second/third
+            -- stable observations. Stop journaling once effectively mature.
+            if best and best_score > 0 and best_score < 11 then
+                best.time = os.time(); best.mode = mode
+                result[#result + 1] = best
+            end
+        end
+    end
+    return result
 end
 
 function M.diff(raw, before, selected, floor, mode)
