@@ -202,7 +202,8 @@ int main(int argc, char** argv) {
         check(property("review_learning_count") == std::to_string(learned_before), "deleted correction learned");
         reset(); type("ef"); key(0xff09); type("a"); held("丙");
         type("b"); key(' '); check(committed == "丙甲", "Tab buffered commit failed");
-        check(property("review_learning_count") == std::to_string(learned_before + 1), "final submission did not learn once");
+        check(property("review_learning_count") == std::to_string(learned_before),
+              "Direct-to-Direct submission unexpectedly changed learning count");
 
         reset(); type("vpa");
         check(api->select_schema(session, "other"), "schema switch failed"); drain();
