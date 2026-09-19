@@ -331,7 +331,7 @@ function M.fusion_mode(mode)
 end
 
 function M.fusion_pair_code(raw, direct, composed)
-    return M.hash((raw or "") .. "\0D\0" .. (direct or "") .. "\0C\0" .. (composed or ""))
+    return "~f" .. M.hash((raw or "") .. "\0D\0" .. (direct or "") .. "\0C\0" .. (composed or ""))
 end
 
 function M.fusion_score(index, mode, raw, direct, composed)
