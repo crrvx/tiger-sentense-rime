@@ -3354,11 +3354,17 @@ local function learning_selection(env, state)
     local target = segment and segment.selected_index or 0
     local results = decode(raw, false, state.committed_text, active_lock(state))
     local first, selected, visible = nil, nil, 0
+    local seen = {}
     for _, item in ipairs(results) do
         if implicit_rank_allowed(item, raw, state.continuation_after_auto_commit) and
             item.text:sub(1, #state.committed_text) == state.committed_text and #item.text > #state.committed_text then
             first = first or item
-            if visible == target then selected = item end
+            if visible == target then
+                selected = item
+                selected._fusion_ahead = {}
+                for i = 1, #seen do selected._fusion_ahead[i] = seen[i] end
+            end
+            seen[#seen + 1] = item
             visible = visible + 1
         end
     end
@@ -3371,9 +3377,25 @@ end
 local function learning_stage(env, state, selected, raw, submitted_first)
     local live = env._tiger_learning
     if not live or live.mode == "" or not selected then return end
+
+    -- Cross-source learning is pairwise and never mutates either source's
+    -- internal ordering. Selecting a lower Direct candidate over an earlier
+    -- Composed candidate records only Direct > Composed (and vice versa).
+    for _, ahead in ipairs(selected._fusion_ahead or {}) do
+        local event
+        if candidate_is_direct(selected) and candidate_is_composed_only(ahead) then
+            event = learning.fusion_event(live.mode, raw, selected.text, ahead.text, true,
+                selected.path and selected.path.raw_length or #raw)
+        elseif candidate_is_composed_only(selected) and candidate_is_direct(ahead) then
+            event = learning.fusion_event(live.mode, raw, ahead.text, selected.text, false,
+                selected.path and selected.path.raw_length or #raw)
+        end
+        if event and #live.pending < 256 then live.pending[#live.pending + 1] = event end
+    end
+
     local baseline = state.tab_pending and live.baseline or
         (not state.tab_pending and submitted_first)
-    if baseline then
+    if baseline and candidate_is_composed_only(baseline) and candidate_is_composed_only(selected) then
         local lock = active_lock(state)
         local floor = math.max(#state.committed_raw, lock and #lock.raw or 0)
         local events
@@ -3393,8 +3415,10 @@ learning_submit = function(env, selected, actual, expected)
     if not live then return end
     local events, remaining = {}, {}
     if selected and actual ~= "" and actual == expected and live.mode ~= "" then
+        local fusion_mode = learning.fusion_mode(live.mode)
         for _, e in ipairs(live.pending) do
             if e.raw_end > selected.path.raw_length then remaining[#remaining + 1] = e
+            elseif e.mode == fusion_mode then events[#events + 1] = e
             elseif e.mode == live.mode and e.text_start >= #selected.text - #expected and
                 selected.text:sub(e.text_start + 1, e.text_end) == e.text then events[#events + 1] = e end
         end
@@ -3411,7 +3435,7 @@ local function prepare_learning(env, attach)
         local ok, value = pcall(function() return schema.config:get_bool("tiger_sentence/tab_learning") end)
         if ok and value == false then enabled = false end
     end
-    local mode = enabled and ("sentence-v1|rules=" .. (lexicon_state.learning_rules or "") ..
+    local mode = enabled and ("sentence-v2|rules=" .. (lexicon_state.learning_rules or "") ..
         "|optimal=" .. tostring(lexicon_state.high_freq_limit) .. "|dup=" .. (active_allow_duplicate_single and "1" or "0")) or ""
     local schema_id = schema and schema.schema_id or "tiger_sentence"
     if env._tiger_learning_schema_id ~= schema_id then
