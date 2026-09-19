@@ -3603,12 +3603,18 @@ local function processor(key_event, env)
             local segment = composition and not composition:empty() and composition:back()
             local target = segment and segment.selected_index or 0
             local decoded = decode(full_before, false, state.committed_text, active_lock(state))
-            local selected, visible = nil, 0
+            local selected, visible, seen = nil, 0, {}
             for _, item in ipairs(decoded) do
                 if implicit_rank_allowed(item, full_before, state.continuation_after_auto_commit) and
                     item.text:sub(1, #state.committed_text) == state.committed_text and
                     #item.text > #state.committed_text then
-                    if visible == target then selected = item; break end
+                    if visible == target then
+                        selected = item
+                        selected._fusion_ahead = {}
+                        for i = 1, #seen do selected._fusion_ahead[i] = seen[i] end
+                        break
+                    end
+                    seen[#seen + 1] = item
                     visible = visible + 1
                 end
             end
