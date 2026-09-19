@@ -1467,6 +1467,21 @@ local function current_state_comparator()
     return state_better_rank_first
 end
 
+local source_direct, source_composed = 1, 2
+local function source_union(a, b)
+    a, b = a or 0, b or 0
+    if a == 0 then return b end
+    if b == 0 or a == b then return a end
+    return 3
+end
+local function candidate_is_direct(item)
+    local source = item and item.source_mask or 0
+    return source == source_direct or source == 3
+end
+local function candidate_is_composed_only(item)
+    return item and item.source_mask == source_composed
+end
+
 local function duplicate_better(item, previous)
     if (item.learning_score or 0) > 0 or (previous.learning_score or 0) > 0 or
         (item.learning_potential or 0) > 0 or (previous.learning_potential or 0) > 0 then
@@ -1503,9 +1518,13 @@ local function add_aggregated(bucket, item)
         bucket._order[#bucket._order + 1] = item.text
     else
         mass[item.text] = logsumexp(mass[item.text], item_mass)
+        local source = source_union(previous.source_mask, item.source_mask)
+        local direct_rank = math.min(previous.direct_rank or math.huge, item.direct_rank or math.huge)
         if duplicate_better(item, previous) then
             best[item.text] = item
         end
+        best[item.text].source_mask = source
+        best[item.text].direct_rank = direct_rank
     end
     best[item.text].mass_score = mass[item.text]
 end
@@ -1529,8 +1548,14 @@ local function ensure_aggregated(bucket)
         if not previous then
             order[#order + 1] = item.text
             best[item.text] = item
-        elseif duplicate_better(item, previous) then
-            best[item.text] = item
+        else
+            local source = source_union(previous.source_mask, item.source_mask)
+            local direct_rank = math.min(previous.direct_rank or math.huge, item.direct_rank or math.huge)
+            if duplicate_better(item, previous) then
+                best[item.text] = item
+            end
+            best[item.text].source_mask = source
+            best[item.text].direct_rank = direct_rank
         end
     end
     for i = #bucket, 1, -1 do
@@ -1750,9 +1775,15 @@ local function expand_range(raw, states, from_pos, length, minimum_consumed_end)
                                         score = score + whole_input_single_character_reward_added
                                     end
                                     local text = item.text .. candidate.t
-                                    local learned, potential, learning_early_bonus = learning.reward(
-                                        learning_index, learning_mode, raw, text, consumed_end, item)
-                                    if learned > 0 or potential > 0 then learning_affected = true end
+                                    local direct_edge = item.previous == nil and position == 0 and whole_input_edge
+                                    local learned = item.learning_score or 0
+                                    local potential = 0
+                                    local learning_early_bonus = item.learning_early_commit_bonus or 0
+                                    if not direct_edge then
+                                        learned, potential, learning_early_bonus = learning.reward(
+                                            learning_index, learning_mode, raw, text, consumed_end, item)
+                                        if learned > 0 or potential > 0 then learning_affected = true end
+                                    end
                                     add_state(states[consumed_end], {
                                         score = score + learned - (item.learning_score or 0),
                                         learning_score = learned,
@@ -1765,6 +1796,8 @@ local function expand_range(raw, states, from_pos, length, minimum_consumed_end)
                                         prev2 = prev2,
                                         prev1 = prev1,
                                         max_rank = math.max(item.max_rank or 1, candidate.r),
+                                        source_mask = direct_edge and source_direct or source_composed,
+                                        direct_rank = direct_edge and candidate.r or math.huge,
                                         supplement_state = supplement_state,
                                         supplement_score = (item.supplement_score or 0.0) +
                                             supplement_added,
@@ -1829,11 +1862,12 @@ local function evaluate_state(item)
     -- high-share early commit.
     local confidence_ending_adjustment = eos_score - isolation_penalty(item.text)
     local confidence_score = (item.mass_score or item.score) + confidence_ending_adjustment
+    local direct = candidate_is_direct(item)
     local personalization = math.min(ranking_prior.personalized_early_commit_cap,
         ranking_prior.supplement_early_commit_contribution(item.supplement_score or 0) +
-        (item.learning_early_commit_bonus or 0))
+        (direct and 0 or (item.learning_early_commit_bonus or 0)))
     return {
-        score = item.score + ending_adjustment,
+        score = item.score + ending_adjustment - (direct and (item.learning_score or 0) or 0),
         confidence_score = confidence_score,
         early_commit_confidence_score = confidence_score + personalization,
         text = item.text,
@@ -1842,7 +1876,9 @@ local function evaluate_state(item)
         max_rank = math.max(1, item.max_rank or 1),
         supplement_score = item.supplement_score or 0.0,
         code_score = item.code_score or 0.0,
-        learning_score = item.learning_score or 0,
+        learning_score = direct and 0 or (item.learning_score or 0),
+        source_mask = item.source_mask or 0,
+        direct_rank = item.direct_rank or math.huge,
         edge_count = item.edge_count or 0,
         path = item
     }
@@ -2089,6 +2125,57 @@ local function prefer_score_over_lexicon_rank(values)
     return false
 end
 
+local function apply_fusion_ordering(raw, candidates)
+    if #candidates < 2 then return candidates end
+    local base, direct, composed = {}, {}, {}
+    for i = 1, #candidates do
+        local item = candidates[i]
+        if base[item.text] == nil then base[item.text] = i end
+        if candidate_is_direct(item) then direct[#direct + 1] = item
+        else composed[#composed + 1] = item end
+    end
+    table.sort(direct, function(a, b)
+        local ar, br = a.direct_rank or math.huge, b.direct_rank or math.huge
+        if ar ~= br then return ar < br end
+        return (base[a.text] or math.huge) < (base[b.text] or math.huge)
+    end)
+    if #direct == 0 or #composed == 0 then
+        if #composed == 0 then
+            for i = 1, #direct do candidates[i] = direct[i] end
+        end
+        return candidates
+    end
+    local merged, di, ci = {}, 1, 1
+    while di <= #direct and ci <= #composed do
+        local d, c = direct[di], composed[ci]
+        local direct_prefix, composed_prefix = 0, 0
+        for i = di, #direct do
+            direct_prefix = math.max(direct_prefix,
+                learning.fusion_score(learning_index, learning_mode, raw, direct[i].text, c.text))
+        end
+        for i = ci, #composed do
+            composed_prefix = math.max(composed_prefix,
+                -learning.fusion_score(learning_index, learning_mode, raw, d.text, composed[i].text))
+        end
+        local take_direct
+        if direct_prefix > 0 or composed_prefix > 0 then
+            if math.abs(direct_prefix - composed_prefix) > 1e-12 then
+                take_direct = direct_prefix > composed_prefix
+            else
+                take_direct = (base[d.text] or math.huge) < (base[c.text] or math.huge)
+            end
+        else
+            take_direct = (base[d.text] or math.huge) < (base[c.text] or math.huge)
+        end
+        if take_direct then merged[#merged + 1] = direct[di]; di = di + 1
+        else merged[#merged + 1] = composed[ci]; ci = ci + 1 end
+    end
+    while di <= #direct do merged[#merged + 1] = direct[di]; di = di + 1 end
+    while ci <= #composed do merged[#merged + 1] = composed[ci]; ci = ci + 1 end
+    for i = 1, #merged do candidates[i] = merged[i] end
+    return candidates
+end
+
 local function emit(raw, states, length, include_early_commit, required_text_prefix)
     local completed = dedup_limit(states[length], beam_limit_at(length))
     states[length] = completed
@@ -2123,6 +2210,7 @@ local function emit(raw, states, length, include_early_commit, required_text_pre
         end
         table.sort(result, better)
     end
+    apply_fusion_ordering(raw, result)
     result.learning_affected = learning_affected
     result._completed_truncated = completed._truncated or false
     -- Display Top-K is not the probability pool. Retain the scored beam for
