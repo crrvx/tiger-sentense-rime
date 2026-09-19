@@ -2,6 +2,7 @@
 -- Stable behavior-only serialization deliberately ignores cache/layout fields.
 local source, data, mode, random_cases = arg[1], arg[2], arg[3], tonumber(arg[4]) or 20
 local ignore_early_evidence = arg[8] == "ignore-early-evidence"
+local ignore_learning_behavior = arg[9] == "ignore-learning-behavior"
 package.path=source.."/lua/?.lua;"..package.path
 rime_api={get_user_data_dir=function()return data end}
 os.time=function()return 1800000000 end
@@ -96,7 +97,8 @@ end
 for i=1,300 do
     events[#events+1]={code="ueot"..string.format("%04d",i),text="的是甲",context="",mode="snapshot",time=os.time()}
 end
-for _,learned in ipairs({false,true})do
+local learned_modes = ignore_learning_behavior and {false} or {false,true}
+for _,learned in ipairs(learned_modes)do
     for _,duplicate in ipairs({false,true})do
         sentence.set_allow_duplicate_single({get_option=function()return duplicate end})
         sentence.set_learning_for_test(learned and learning.runtime_index(events,os.time()) or nil,learned and "snapshot" or "")

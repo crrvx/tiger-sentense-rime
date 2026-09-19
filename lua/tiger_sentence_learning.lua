@@ -326,6 +326,32 @@ function M.early_commit_contribution(score)
     return math.min(0.75, math.max(0, score or 0) * M.early_commit_maturity(score) * 0.075)
 end
 
+function M.fusion_mode(mode)
+    return mode == "" and "" or ("fusion-v1|" .. mode)
+end
+
+function M.fusion_pair_code(raw, direct, composed)
+    return "~f" .. M.hash((raw or "") .. "\0D\0" .. (direct or "") .. "\0C\0" .. (composed or ""))
+end
+
+function M.fusion_score(index, mode, raw, direct, composed)
+    if not index or mode == "" then return 0 end
+    local fusion = M.fusion_mode(mode)
+    local code = M.fusion_pair_code(raw, direct, composed)
+    return M.score(index, fusion, code, "D", "") - M.score(index, fusion, code, "C", "")
+end
+
+function M.fusion_event(mode, raw, direct, composed, direct_wins, raw_end)
+    if mode == "" then return nil end
+    return {
+        time=os.time(), mode=M.fusion_mode(mode),
+        code=M.fusion_pair_code(raw, direct, composed),
+        text=direct_wins and "D" or "C", context="",
+        raw_start=0, raw_end=math.max(0, raw_end or #raw),
+        text_start=0, text_end=1
+    }
+end
+
 function M.reward(index, mode, raw, text, finish, previous)
     local best, potential, start = previous.learning_score or 0, 0, previous
     local early_bonus = previous.learning_early_commit_bonus or 0
