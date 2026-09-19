@@ -1467,19 +1467,19 @@ local function current_state_comparator()
     return state_better_rank_first
 end
 
-local source_direct, source_composed = 1, 2
-local function source_union(a, b)
+learning.source_direct, learning.source_composed = 1, 2
+function learning.source_union(a, b)
     a, b = a or 0, b or 0
     if a == 0 then return b end
     if b == 0 or a == b then return a end
     return 3
 end
-local function candidate_is_direct(item)
+function learning.candidate_is_direct(item)
     local source = item and item.source_mask or 0
-    return source == source_direct or source == 3
+    return source == learning.source_direct or source == 3
 end
-local function candidate_is_composed_only(item)
-    return item and item.source_mask == source_composed
+function learning.candidate_is_composed_only(item)
+    return item and item.source_mask == learning.source_composed
 end
 
 local function duplicate_better(item, previous)
@@ -1518,7 +1518,7 @@ local function add_aggregated(bucket, item)
         bucket._order[#bucket._order + 1] = item.text
     else
         mass[item.text] = logsumexp(mass[item.text], item_mass)
-        local source = source_union(previous.source_mask, item.source_mask)
+        local source = learning.source_union(previous.source_mask, item.source_mask)
         local direct_rank = math.min(previous.direct_rank or math.huge, item.direct_rank or math.huge)
         if duplicate_better(item, previous) then
             best[item.text] = item
@@ -1549,7 +1549,7 @@ local function ensure_aggregated(bucket)
             order[#order + 1] = item.text
             best[item.text] = item
         else
-            local source = source_union(previous.source_mask, item.source_mask)
+            local source = learning.source_union(previous.source_mask, item.source_mask)
             local direct_rank = math.min(previous.direct_rank or math.huge, item.direct_rank or math.huge)
             if duplicate_better(item, previous) then
                 best[item.text] = item
@@ -1796,7 +1796,7 @@ local function expand_range(raw, states, from_pos, length, minimum_consumed_end)
                                         prev2 = prev2,
                                         prev1 = prev1,
                                         max_rank = math.max(item.max_rank or 1, candidate.r),
-                                        source_mask = direct_edge and source_direct or source_composed,
+                                        source_mask = direct_edge and learning.source_direct or learning.source_composed,
                                         direct_rank = direct_edge and candidate.r or math.huge,
                                         supplement_state = supplement_state,
                                         supplement_score = (item.supplement_score or 0.0) +
@@ -1862,7 +1862,7 @@ local function evaluate_state(item)
     -- high-share early commit.
     local confidence_ending_adjustment = eos_score - isolation_penalty(item.text)
     local confidence_score = (item.mass_score or item.score) + confidence_ending_adjustment
-    local direct = candidate_is_direct(item)
+    local direct = learning.candidate_is_direct(item)
     local personalization = math.min(ranking_prior.personalized_early_commit_cap,
         ranking_prior.supplement_early_commit_contribution(item.supplement_score or 0) +
         (direct and 0 or (item.learning_early_commit_bonus or 0)))
@@ -2125,13 +2125,13 @@ local function prefer_score_over_lexicon_rank(values)
     return false
 end
 
-local function apply_fusion_ordering(raw, candidates)
+function learning.apply_fusion_ordering(raw, candidates)
     if #candidates < 2 then return candidates end
     local base, direct, composed = {}, {}, {}
     for i = 1, #candidates do
         local item = candidates[i]
         if base[item.text] == nil then base[item.text] = i end
-        if candidate_is_direct(item) then direct[#direct + 1] = item
+        if learning.candidate_is_direct(item) then direct[#direct + 1] = item
         else composed[#composed + 1] = item end
     end
     table.sort(direct, function(a, b)
@@ -2210,7 +2210,7 @@ local function emit(raw, states, length, include_early_commit, required_text_pre
         end
         table.sort(result, better)
     end
-    apply_fusion_ordering(raw, result)
+    learning.apply_fusion_ordering(raw, result)
     result.learning_affected = learning_affected
     result._completed_truncated = completed._truncated or false
     -- Display Top-K is not the probability pool. Retain the scored beam for
@@ -3383,10 +3383,10 @@ local function learning_stage(env, state, selected, raw, submitted_first)
     -- Composed candidate records only Direct > Composed (and vice versa).
     for _, ahead in ipairs(selected._fusion_ahead or {}) do
         local event
-        if candidate_is_direct(selected) and candidate_is_composed_only(ahead) then
+        if learning.candidate_is_direct(selected) and learning.candidate_is_composed_only(ahead) then
             event = learning.fusion_event(live.mode, raw, selected.text, ahead.text, true,
                 selected.path and selected.path.raw_length or #raw)
-        elseif candidate_is_composed_only(selected) and candidate_is_direct(ahead) then
+        elseif learning.candidate_is_composed_only(selected) and learning.candidate_is_direct(ahead) then
             event = learning.fusion_event(live.mode, raw, ahead.text, selected.text, false,
                 selected.path and selected.path.raw_length or #raw)
         end
@@ -3395,7 +3395,7 @@ local function learning_stage(env, state, selected, raw, submitted_first)
 
     local baseline = state.tab_pending and live.baseline or
         (not state.tab_pending and submitted_first)
-    if baseline and candidate_is_composed_only(baseline) and candidate_is_composed_only(selected) then
+    if baseline and learning.candidate_is_composed_only(baseline) and learning.candidate_is_composed_only(selected) then
         local lock = active_lock(state)
         local floor = math.max(#state.committed_raw, lock and #lock.raw or 0)
         local events
@@ -4071,7 +4071,7 @@ M.buffer_filter = function(input, env)
     end
 end
 M.learning = learning
-M.apply_fusion_ordering_for_test = apply_fusion_ordering
+M.apply_fusion_ordering_for_test = learning.apply_fusion_ordering
 M.set_learning_for_test = function(index, mode)
     learning_index, learning_mode = index, mode or ""
     reset_decode_cache()
