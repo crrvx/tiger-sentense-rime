@@ -42,6 +42,8 @@ def main():
                         help="Disable compact ranking priors when a source exposes the test hook")
     parser.add_argument("--ignore-early-evidence", action="store_true",
                         help="Keep strict decoder/menu/path parity while omitting early-commit evidence from old/new snapshots")
+    parser.add_argument("--ignore-learning-behavior", action="store_true",
+                        help="Compare only unlearned snapshots when learning semantics are intentionally changed")
     args = parser.parse_args()
     lua = shutil.which(args.lua)
     if not lua:
@@ -91,7 +93,8 @@ def main():
                                          "mobile" if model else "none", str(args.cases),
                                          args.memory_profile, str(args.trim_every),
                                          "legacy-ranking" if args.legacy_ranking else "current-ranking",
-                                         "ignore-early-evidence" if args.ignore_early_evidence else "full-snapshot"],
+                                         "ignore-early-evidence" if args.ignore_early_evidence else "full-snapshot",
+                                         "ignore-learning-behavior" if args.ignore_learning_behavior else "full-learning"],
                                         stdout=stream, stderr=subprocess.PIPE, timeout=600)
             if result.returncode:
                 raise RuntimeError(f"{label} probe failed:\n{result.stderr.decode('utf-8', errors='replace')}")
@@ -119,6 +122,7 @@ def main():
                   "random_cases": args.cases, "memory_profile": args.memory_profile,
                   "trim_every": args.trim_every, "legacy_ranking": args.legacy_ranking,
                   "ignore_early_evidence": args.ignore_early_evidence,
+                  "ignore_learning_behavior": args.ignore_learning_behavior,
                   "baseline": stats[0], "candidate": stats[1],
                   "snapshot_sha256": [digest(p) for p in outputs], "first_mismatch": mismatch,
                   "source_manifests": {label: {str(p.relative_to(tree)): digest(p) for p in sorted(
