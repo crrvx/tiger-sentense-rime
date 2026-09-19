@@ -4065,6 +4065,7 @@ M.buffer_filter = function(input, env)
     end
 end
 M.learning = learning
+M.apply_fusion_ordering_for_test = apply_fusion_ordering
 M.set_learning_for_test = function(index, mode)
     learning_index, learning_mode = index, mode or ""
     reset_decode_cache()
