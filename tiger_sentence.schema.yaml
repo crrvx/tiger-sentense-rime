@@ -59,7 +59,7 @@ engine:
 speller:
   alphabet: "zyxwvutsrqponmlkjihgfedcba;';0123456789~"
   initials: "abcdefghijklmnopqrstuvwxyz~"
-  delimiter: " "
+  delimiter: " '"
   auto_select: false
 
 menu:
@@ -98,7 +98,7 @@ punctuator:
 
 recognizer:
   patterns:
-    reverse_lookup: "^`[a-z]*'?$"
+    reverse_lookup: "^`[a-z']*$"
 
 # 拼音反查:PY_c 为随包提供的简体全量拼音词典(源自官方秃版小狼毫);缺它时反查段无候选。
 reverse_lookup:

@@ -136,7 +136,9 @@ SHA256：`c0063898fdff27c1fb00c1c72fa28a6c1b375fade1ec2045d731b9db958bdecc`。
   拼音数据为随包提供的简体全量词典 `PY_c`（82 万条，源自官方秃版小狼毫），
   经 `schema/dependencies` 在部署时自动编译；换用其它拼音词典同理
   patch `reverse_lookup/dictionary`。
-  反查段内 Enter 原样上屏、Esc 取消。
+  反查段内数字选择候选；`'` 可作音节分隔（需要 librime 已包含上游
+  delimiter 修复，未修复的引擎输入分隔符会中断反查）。Enter 原样上屏、
+  Esc 取消。
 
 自动上屏按 `(文本前缀, raw 边界)` 独立
 累计证据，置信阈值 `0.995`、强证据/边界封闭 `0.99999`；截断的候选池

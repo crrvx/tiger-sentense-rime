@@ -75,5 +75,18 @@ check(sentence.reverse_comment(mixed)==word_comment(mixed),
     'partial-code word comment mismatch: '..mixed)
 check(sentence.reverse_comment(mixed):find("Z:?"),'missing character not marked')
 
+-- 识别规则放行音节分隔(处理器保留反查段内的 '),且不得收进数字。
+local schema_file=assert(io.open(repo.."/tiger_sentence.schema.yaml","rb"))
+local schema_text=schema_file:read("*a")
+schema_file:close()
+local pattern=schema_text:match('reverse_lookup: "([^"]+)"')
+check(pattern,'reverse_lookup recognizer pattern missing')
+for _,sample in ipairs({ "`","`xi","`xi'","`xi'a","`xi'an","`xi'an'" }) do
+    check(sample:match(pattern)~=nil,'reverse pattern rejected '..sample)
+end
+for _,sample in ipairs({ "`ni2","`xi'an2","`xi a","xi'an" }) do
+    check(sample:match(pattern)==nil,'reverse pattern accepted '..sample)
+end
+
 print(string.format('OK reverse lookup comments: %d checks, %d single-character entries, multi-code sample: %s, word sample: %s',
     checks, #order, multi, sample_word))
