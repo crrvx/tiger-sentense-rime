@@ -43,30 +43,44 @@ int main(int argc, char** argv) {
         if (api->start_maintenance(True)) api->join_maintenance_thread();
         start(); type();
         check(first() == "其父", "unexpected model baseline");
-        for (int round = 0; round < 2; ++round) {
-            RIME_STRUCT(RimeContext, ctx);
-            check(api->get_context(session, &ctx), "missing correction menu");
-            int index = -1;
-            for (int i = 0; i < ctx.menu.num_candidates; ++i)
-                if (std::string(ctx.menu.candidates[i].text) == "虎娘") index = i;
-            api->free_context(&ctx);
-            check(index > 0, "correction must remain a non-first candidate before learning");
-            if (std::string(argv[4]) == "tap") {
-                check(api->select_candidate(session, index), "candidate tap rejected");
-            } else {
-                for (int i = 0; i < index; ++i)
-                    check(api->process_key(session, 0xff09, 0), "Tab rejected");
-                check(api->process_key(session, ' ', 0), "space rejected");
-            }
-            RIME_STRUCT(RimeCommit, commit);
-            check(api->get_commit(session, &commit), "selection did not submit");
-            const std::string text = commit.text ? commit.text : "";
-            api->free_commit(&commit);
-            check(text == "虎娘", "submitted wrong text");
-            type();
-            std::cout << argv[4] << " correction " << round + 1 << " first=" << first() << std::endl;
+        RIME_STRUCT(RimeContext, ctx);
+        check(api->get_context(session, &ctx), "missing correction menu");
+        int index = -1;
+        for (int i = 0; i < ctx.menu.num_candidates; ++i)
+            if (std::string(ctx.menu.candidates[i].text) == "虎娘") index = i;
+        api->free_context(&ctx);
+        check(index > 0, "target must start as a non-first candidate");
+        if (std::string(argv[4]) == "tap") {
+            check(api->select_candidate(session, index), "candidate tap rejected");
+        } else {
+            for (int i = 0; i < index; ++i)
+                check(api->process_key(session, 0xff09, 0), "Tab rejected");
+            check(api->process_key(session, ' ', 0), "space rejected");
         }
-        check(first() == "虎娘", "repeated corrections failed to promote real-model candidate");
+        RIME_STRUCT(RimeCommit, commit);
+        check(api->get_commit(session, &commit), "selection did not submit");
+        const std::string corrected = commit.text ? commit.text : "";
+        api->free_commit(&commit);
+        check(corrected == "虎娘", "submitted wrong correction");
+
+        type();
+        check(first() == "虎娘", "one manual correction did not promote real-model candidate");
+        std::cout << argv[4] << " correction first=" << first() << std::endl;
+
+        // Normal acceptance of the learned top candidate must remain a normal
+        // commit. The Lua unit regression separately asserts that this writes
+        // no additional learning event.
+        if (std::string(argv[4]) == "tap")
+            check(api->select_candidate(session, 0), "learned top tap rejected");
+        else
+            check(api->process_key(session, ' ', 0), "learned top space rejected");
+        RIME_STRUCT(RimeCommit, accepted);
+        check(api->get_commit(session, &accepted), "learned top did not submit");
+        const std::string acceptedText = accepted.text ? accepted.text : "";
+        api->free_commit(&accepted);
+        check(acceptedText == "虎娘", "learned top submitted wrong text");
+        type();
+        check(first() == "虎娘", "normal learned top use changed ranking");
         api->destroy_session(session); session = 0;
         api->finalize(); api->initialize(&traits);
         start(); type();

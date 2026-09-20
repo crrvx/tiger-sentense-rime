@@ -3288,13 +3288,7 @@ local function learning_stage(env, state, selected, raw, submitted_first)
     if baseline then
         local lock = active_lock(state)
         local floor = math.max(#state.committed_raw, lock and #lock.raw or 0)
-        local events
-        if not state.tab_pending and submitted_first and selected.text == submitted_first.text and
-            live.store and live.store.index then
-            events = learning.reinforce(live.store.index, live.mode, raw, selected, floor)
-        else
-            events = learning.diff(raw, baseline, selected, floor, live.mode)
-        end
+        local events = learning.diff(raw, baseline, selected, floor, live.mode)
         for _, e in ipairs(events) do if #live.pending < 256 then live.pending[#live.pending + 1] = e end end
     end
     live.baseline = nil
@@ -3323,7 +3317,7 @@ local function prepare_learning(env, attach)
         local ok, value = pcall(function() return schema.config:get_bool("tiger_sentence/tab_learning") end)
         if ok and value == false then enabled = false end
     end
-    local mode = enabled and ("sentence-v1|rules=" .. (lexicon_state.learning_rules or "") ..
+    local mode = enabled and ("sentence-v2|rules=" .. (lexicon_state.learning_rules or "") ..
         "|optimal=" .. tostring(lexicon_state.high_freq_limit) .. "|dup=" .. (active_allow_duplicate_single and "1" or "0")) or ""
     local schema_id = schema and schema.schema_id or "tiger_sentence"
     if env._tiger_learning_schema_id ~= schema_id then
