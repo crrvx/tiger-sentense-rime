@@ -103,7 +103,7 @@ sentence.set_learning_for_test(nil,"")
 check(sentence.decode("abcd")[1].text=="交否","disable restores base Composed ranking")
 
 local function key(repr)
-    return {repr=function()return repr end,release=function()return false end,
+    return {keycode=({comma=44,period=46})[repr],repr=function()return repr end,release=function()return false end,
         ctrl=function()return false end,alt=function()return false end,
         super=function()return false end,shift=function()return false end}
 end
@@ -197,6 +197,21 @@ check(writes==before_taps+1,"disabled learning ignores taps")
 tap_config.enabled=true;tap_type();tap_press("Tab");tap_ctx:confirm_current_selection()
 check(writes==before_taps+2,"Tab followed by tap records one correction")
 sentence.processor_component.fini(tap_env)
+for _, punctuation in ipairs({"comma", "period"}) do
+    local p_env,p_ctx,p_press,p_type=host("punct-"..punctuation,false)
+    local start_writes=writes
+    p_type();p_press("Tab");p_press("Escape");p_press(punctuation)
+    check(writes==start_writes,"cancel before punctuation does not learn")
+    p_type();p_press("Tab");p_ctx.transform=true;p_press(punctuation);p_ctx.transform=false
+    check(writes==start_writes,"transformed punctuation commit does not learn")
+    p_type();p_press("Tab");p_ctx.repeat_notification=true
+    check(p_press(punctuation)==2,"punctuation stays with native punctuator")
+    check(writes==start_writes+1,"punctuation confirmation learns exactly once")
+    check(p_ctx.input=="","sentence submitted before punctuation input")
+    p_press(punctuation)
+    check(writes==start_writes+1,"idle punctuation cannot replay correction")
+    sentence.processor_component.fini(p_env)
+end
 -- Runtime partitions must match an independent full journal replay, including
 -- competing choices, generalization, caps, old snapshots and clock jumps.
 local real_time, clock = os.time, now

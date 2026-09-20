@@ -3753,13 +3753,17 @@ local function processor(key_event, env)
         return 2
     end
     local codepoint = key_event.keycode
-    if state.buffered_text ~= "" and type(codepoint) == "number" and
+    if context:has_menu() and type(codepoint) == "number" and
         codepoint >= 33 and codepoint <= 126 and
         string.char(codepoint):match("%p") and
         not key_event:ctrl() and not key_event:alt() and not key_event:super() then
-        -- Letters and rank selectors were handled above. Flush this complete
-        -- composition BEFORE punctuator creates/closes another Rime segment;
-        -- then let the configured punctuation table handle the original key.
+        -- Letters and rank selectors were handled above. Submit while the
+        -- sentence menu/raw input still identifies the corrected path. Once
+        -- punctuator appends its segment, learning_selection cannot decode
+        -- that input (e.g. zhhbi,) or recover the sentence's selected index.
+        -- Keep punctuation handling in the configured Rime punctuator.
+        local selected, _, raw = learning_selection(env, state)
+        learning_stage(env, state, selected, raw)
         context:confirm_current_selection()
         return 2
     end
