@@ -103,6 +103,18 @@ print(string.format(
     "OK  plain-text data files loaded (%d codes, %d ranks, %d whitelist)",
     status.codes_count, status.ranks_count, status.whitelist_count))
 
+local competing_end = sentence.competing_boundary_end("jreynvtah", 4, 6, 1)
+if competing_end ~= 7 then
+    fail("aligned retention missed nv | nvt competition: " .. tostring(competing_end))
+end
+if sentence.competing_boundary_end("jreynvtahx", 4, 7, 1) ~= 7 then
+    fail("second output element incorrectly delayed a one-element boundary")
+end
+if sentence.competing_boundary_end("jreynvtahx", 4, 9, 2) ~= 10 then
+    fail("two-element retention missed nv|tah versus nvt|ahx")
+end
+print("OK  retained lookahead aligns competing paths by emitted text elements")
+
 for _, raw in ipairs({ "awmenamcunta", "iejryfenahbmsp", "jqtusotuqiueottu",
         "nnczggqrrjrrltwwbwkedmkswgjgiuapnphbszbp" }) do
     check_lazy_scoring(raw)
@@ -437,7 +449,20 @@ local kept = retained["甲乙" .. string.char(31) .. "2"]
 if not kept or kept.gap_count ~= 1 then
     fail("a supported tracker did not survive a comparison-only gap")
 end
-print("OK  comparison-only gaps follow contradiction and support rules")
+local mature_trackers = {
+    ["甲乙" .. string.char(31) .. "2"] = {
+        text = "甲乙", raw_length = 2,
+        evidence_count = 3, strong_count = 2,
+        gap_count = 0, last_share = 0.99
+    }
+}
+retained = sentence.retain_trackers_without_counting(
+    mature_trackers, stale_prefixes, true)
+kept = retained["甲乙" .. string.char(31) .. "2"]
+if not kept or kept.evidence_count ~= 0 or kept.strong_count ~= 0 then
+    fail("a low-confidence gap preserved stale maturity")
+end
+print("OK  comparison-only gaps retain identity while low-confidence gaps reset maturity")
 
 local strong_eligible = {
     { text = "甲", confidence_score = 0.0 },
@@ -1011,6 +1036,15 @@ if model.loaded then
         fail("iejryfenahbmsp entered the 新人上窦 continuation")
     end
     print("OK  iejryfenahbmsp finishes as 新人上午来面试")
+
+    joined, yielded = run_early_commit_sample("jreynvtahx")
+    if joined .. (yielded[1] or "") ~= "人也郁闷" then
+        fail(string.format("jreynvtahx became %s + %s", joined, tostring(yielded[1])))
+    end
+    if joined:find("有", 1, true) then
+        fail("jreynvtahx committed 有 before the nvt competing boundary had three-key lookahead")
+    end
+    print("OK  jreynvtahx preserves nvt crossing split until 人也郁闷 wins")
 else
     print("SKIP Windows early-commit regressions (no real model)")
 end
