@@ -39,7 +39,7 @@ def temporary_tree():
 def isolated_sources(destination):
     shutil.copytree(PACK / "lua", destination / "lua")
     (destination / "tools").mkdir()
-    for name in ("test_tiger_sentence_incremental.lua", "test_rime_contract.lua", "test_sentence_safety.lua", "test_sentence_learning.lua", "test_review_regressions.lua", "test_ngram_reader.lua", "test_memory.lua", "test_lexical_prior.lua"):
+    for name in ("test_tiger_sentence_incremental.lua", "test_rime_contract.lua", "test_sentence_safety.lua", "test_sentence_learning.lua", "test_review_regressions.lua", "test_ngram_reader.lua", "test_memory.lua", "test_lexical_prior.lua", "test_allocation.lua"):
         source = (ROOT / "tools" / name).read_text(encoding="utf-8")
         # Run the shared suite in the public mirror layout, without copying
         # unrelated TigerClaw tools or any live configuration/model files.
@@ -68,6 +68,13 @@ def execute(lua, root, script, override=None):
 def negative_controls(lua, root):
     source = (root / "lua/tiger_sentence.lua").read_text(encoding="utf-8")
     variants = [
+        ("partial-ranking-work", "test_allocation.lua",
+         'local function evaluate_evidence_state(item)\n',
+         'local function evaluate_evidence_state(item)\n    path_isolation_penalty(item)\n',
+         "Partial evidence evaluated ranking-only isolation"),
+        ("fusion-pair-cache", "test_allocation.lua",
+         'local score = pair_scores[key]', 'local score = nil',
+         "Fusion recalculated an identical pair in one merge"),
         ("memory-schema-less", "test_memory.lua",
          'if not env or not schema then return end',
          'if not env or not schema then set_memory_profile("balanced"); return end',
@@ -177,7 +184,7 @@ def main():
     lua = str(Path(lua).resolve())
     with temporary_tree() as root:
         isolated_sources(root)
-        for script in ("test_tiger_sentence_incremental.lua", "test_rime_contract.lua", "test_sentence_safety.lua", "test_sentence_learning.lua", "test_review_regressions.lua", "test_ngram_reader.lua", "test_memory.lua", "test_lexical_prior.lua"):
+        for script in ("test_tiger_sentence_incremental.lua", "test_rime_contract.lua", "test_sentence_safety.lua", "test_sentence_learning.lua", "test_review_regressions.lua", "test_ngram_reader.lua", "test_memory.lua", "test_lexical_prior.lua", "test_allocation.lua"):
             result = execute(lua, root, script)
             print(result.stdout, end="", flush=True)
             result.check_returncode()

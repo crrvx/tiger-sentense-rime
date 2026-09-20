@@ -38,6 +38,8 @@ local function path(item)
     local value={raw=item.raw_length,text_length=item.text_length,text=item.text,
         prev2=item.prev2,prev1=item.prev1,score=item.score,mass=item.mass_score or item.score,
         learning=item.learning_score or 0,potential=item.learning_potential or 0,
+        early_bonus=item.learning_early_commit_bonus or 0,source=item.source_mask or 0,
+        direct_rank=(item.direct_rank and item.direct_rank ~= math.huge) and item.direct_rank or "none",code_score=item.code_score or 0,
         rank=item.max_rank or 1,edges=item.edge_count or 0,supplement=item.supplement_score or 0,parent=parent}
     local key=canonical(value)
     local id=path_ids[key]
@@ -51,6 +53,9 @@ local function candidates(items,display)
     for i,item in ipairs(items or {})do
         values[i]={text=item.text,score=item.score,confidence=item.confidence_score or item.score,
             learning=item.learning_score or 0,supplement=item.supplement_score or 0,
+            early_confidence=item.early_commit_confidence_score or item.confidence_score or item.score,
+            source=item.source_mask or 0,direct_rank=(item.direct_rank and item.direct_rank ~= math.huge) and item.direct_rank or "none",
+            code_score=item.code_score or 0,lexical_score=item.lexical_score or 0,
             rank=item.max_rank or 1,edges=item.edge_count or 0,path=path(item.path),
             segmented=display and item.segmented or nil}
     end
@@ -65,7 +70,8 @@ local function capture(label,raw,evidence,required,lock)
     local e=result.early_commit_evidence or {}
     local prefixes={}
     for i,p in ipairs(e.prefixes or {})do
-        prefixes[i]={text=p.text,raw=p.raw_length,share=p.share,boundary_share=p.boundary_share,closed=p.boundary_closed}
+        prefixes[i]={text=p.text,raw=p.raw_length,share=p.share,base_share=p.base_share or p.share,
+            chars=p.text_char_count, boundary_share=p.boundary_share,closed=p.boundary_closed}
     end
     path_nodes,path_ids,path_seen={},{},{}
     local menu=candidates(result,true)
