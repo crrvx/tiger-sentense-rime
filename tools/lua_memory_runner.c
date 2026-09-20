@@ -8,7 +8,7 @@
 #include <lua.h>
 #include <lauxlib.h>
 #include <lualib.h>
-static size_t current_bytes, peak_bytes;
+static size_t current_bytes, peak_bytes, allocation_calls, growth_bytes;
 static void *count_alloc(void *ud, void *ptr, size_t old_size, size_t new_size) {
   (void)ud;
   if (!ptr) old_size = 0; /* Lua passes an object type for a new allocation. */
@@ -19,6 +19,8 @@ static void *count_alloc(void *ud, void *ptr, size_t old_size, size_t new_size) 
   }
   void *next = realloc(ptr, new_size);
   if (next) {
+    ++allocation_calls;
+    if (new_size > old_size) growth_bytes += new_size - old_size;
     current_bytes = current_bytes - old_size + new_size;
     if (current_bytes > peak_bytes) peak_bytes = current_bytes;
   }
@@ -28,6 +30,11 @@ static int memory(lua_State *L) {
   if (lua_toboolean(L, 1)) peak_bytes = current_bytes;
   lua_pushinteger(L, (lua_Integer)current_bytes);
   lua_pushinteger(L, (lua_Integer)peak_bytes);
+  return 2;
+}
+static int allocations(lua_State *L) {
+  lua_pushinteger(L, (lua_Integer)allocation_calls);
+  lua_pushinteger(L, (lua_Integer)growth_bytes);
   return 2;
 }
 int main(int argc, char **argv) {
@@ -41,6 +48,8 @@ int main(int argc, char **argv) {
   luaL_openlibs(L);
   lua_pushcfunction(L, memory);
   lua_setglobal(L, "__memory");
+  lua_pushcfunction(L, allocations);
+  lua_setglobal(L, "__allocations");
   lua_createtable(L, argc, 0);
   for (int i = 0; i < argc; ++i) {
     lua_pushstring(L, argv[i]);

@@ -4,9 +4,9 @@
 稀疏索引也按需分页。不要将模型文件大小、模型页缓存预算或 Lua 堆用量视为
 整个键盘扩展的内存上限。实测条件及结果见 `docs/IOS_MEMORY.md`。
 
-## iOS 紧凑内存档
+## 默认紧凑内存档
 
-在 `tiger_sentence.custom.yaml` 的已有 `patch` 下合并（不要覆盖其它配置）：
+方案默认使用 `compact`。旧安装如需显式指定，可在 `tiger_sentence.custom.yaml` 的已有 `patch` 下合并（不要覆盖其它配置）：
 
 ```yaml
 patch:
@@ -15,7 +15,7 @@ patch:
 
 整体更新 `lua/` 中本方案的五个模块与 `tiger_sentence.lexical.bin`，然后重新部署；
 无需转换或重新下载模型，
-无需清空学习数据。默认 `balanced` 保留较大查询缓存，`compact` 将模型数据页
+无需清空学习数据。可选的 `balanced` 保留较大查询缓存，默认 `compact` 将模型数据页
 缓存从 8 MiB 改为 2 MiB，同时限制查询元数据；两档不改 Beam、评分、候选池、
 学习规则或提前上屏阈值。缩小缓存可能增加缺页和重新计算，需要实机比较延迟。
 

@@ -690,15 +690,26 @@ local ranking_prior = {
     canonical_isolation_min_code_length = 4,
     lexical = require("tiger_sentence_lexical")
 }
-local early_commit_minimum_share = 0.995
--- Two consecutive generations may confirm only when dissenting Beam mass is
--- below 0.001%; every weaker history keeps the original three-key window.
-local early_commit_strong_share = 0.99999
+local early_commit_minimum_share = 0.99
+-- Strong classification stays model-only even when personalization raises the
+-- ordinary multi-generation share.
+local early_commit_strong_share = 0.999
 local early_commit_closed_boundary_share = 0.99999
 local early_commit_required_evidence = 3
 local early_commit_required_strong = 2
 local early_commit_maximum_neutral_gap = 3
 local early_commit_retained_raw_length = 3
+ranking_prior.supplement_early_commit_scale = 0.05
+ranking_prior.supplement_early_commit_cap = 0.75
+ranking_prior.personalized_early_commit_cap = 0.80
+ranking_prior.empty_code_strong_share = 0.99999
+function ranking_prior.supplement_early_commit_contribution(score)
+    return math.min(ranking_prior.supplement_early_commit_cap,
+        math.max(0, score or 0) * ranking_prior.supplement_early_commit_scale)
+end
+function ranking_prior.early_confidence(candidate)
+    return candidate.early_commit_confidence_score or candidate.confidence_score or candidate.score
+end
 -- 允许单字重码组句 defaults to on; the Rime switch only turns it off.
 local allow_duplicate_single_option = "tiger_sentence_allow_duplicate_single"
 local active_allow_duplicate_single = true
@@ -1458,6 +1469,21 @@ local function current_state_comparator()
     return state_better_rank_first
 end
 
+learning.source_direct, learning.source_composed = 1, 2
+function learning.source_union(a, b)
+    a, b = a or 0, b or 0
+    if a == 0 then return b end
+    if b == 0 or a == b then return a end
+    return 3
+end
+function learning.candidate_is_direct(item)
+    local source = item and item.source_mask or 0
+    return source == learning.source_direct or source == 3
+end
+function learning.candidate_is_composed_only(item)
+    return item and item.source_mask == learning.source_composed
+end
+
 local function duplicate_better(item, previous)
     if (item.learning_score or 0) > 0 or (previous.learning_score or 0) > 0 or
         (item.learning_potential or 0) > 0 or (previous.learning_potential or 0) > 0 then
@@ -1494,9 +1520,13 @@ local function add_aggregated(bucket, item)
         bucket._order[#bucket._order + 1] = item.text
     else
         mass[item.text] = logsumexp(mass[item.text], item_mass)
+        local source = learning.source_union(previous.source_mask, item.source_mask)
+        local direct_rank = math.min(previous.direct_rank or math.huge, item.direct_rank or math.huge)
         if duplicate_better(item, previous) then
             best[item.text] = item
         end
+        best[item.text].source_mask = source
+        best[item.text].direct_rank = direct_rank
     end
     best[item.text].mass_score = mass[item.text]
 end
@@ -1520,8 +1550,14 @@ local function ensure_aggregated(bucket)
         if not previous then
             order[#order + 1] = item.text
             best[item.text] = item
-        elseif duplicate_better(item, previous) then
-            best[item.text] = item
+        else
+            local source = learning.source_union(previous.source_mask, item.source_mask)
+            local direct_rank = math.min(previous.direct_rank or math.huge, item.direct_rank or math.huge)
+            if duplicate_better(item, previous) then
+                best[item.text] = item
+            end
+            best[item.text].source_mask = source
+            best[item.text].direct_rank = direct_rank
         end
     end
     for i = #bucket, 1, -1 do
@@ -1619,28 +1655,32 @@ local function dedup_limit(bucket, limit)
         if (item.learning_score or 0) > 0 then better = state_better_score_first; break end
     end
     if truncated_now then
-        local reserved = {}
+        local reserved
         for _, item in ipairs(result) do
-            if (item.learning_potential or 0) > 0 then reserved[#reserved + 1] = item end
+            if (item.learning_potential or 0) > 0 then
+                reserved = reserved or {}; reserved[#reserved + 1] = item
+            end
         end
-        table.sort(reserved, function(a, b) return a.score + a.learning_potential > b.score + b.learning_potential end)
+        if reserved then
+            table.sort(reserved, function(a, b) return a.score + a.learning_potential > b.score + b.learning_potential end)
+        end
         result = select_exact_top(result, limit, better)
-        local kept, added = {}, 0
-        for _, item in ipairs(result) do kept[item] = true end
-        for _, item in ipairs(reserved) do
-            if added == 4 then break end
-            if not kept[item] then result[#result + 1] = item; added = added + 1 end
+        if reserved then
+            local kept, added = {}, 0
+            for _, item in ipairs(result) do kept[item] = true end
+            for _, item in ipairs(reserved) do
+                if added == 4 then break end
+                if not kept[item] then result[#result + 1] = item; added = added + 1 end
+            end
         end
     else
         table.sort(result, better)
     end
-    local limited = new_bucket()
-    for i = 1, #result do
-        limited[i] = result[i]
-    end
-    limited._truncated = truncated
-    limited._frozen = true
-    return limited
+    -- result is private to this invocation; publishing it directly avoids
+    -- allocating/copying a second array without touching an older snapshot.
+    result._truncated = truncated
+    result._frozen = true
+    return result
 end
 
 local function new_states(length)
@@ -1660,6 +1700,7 @@ local function new_states(length)
         code_score = 0.0,
         previous = nil,
         text_length = 0,
+        text_char_count = 0,
         raw_length = 0,
         edge_count = 0
     })
@@ -1741,12 +1782,20 @@ local function expand_range(raw, states, from_pos, length, minimum_consumed_end)
                                         score = score + whole_input_single_character_reward_added
                                     end
                                     local text = item.text .. candidate.t
-                                    local learned, potential = learning.reward(learning_index, learning_mode, raw, text, consumed_end, item)
-                                    if learned > 0 or potential > 0 then learning_affected = true end
+                                    local direct_edge = item.previous == nil and position == 0 and whole_input_edge
+                                    local learned = item.learning_score or 0
+                                    local potential = 0
+                                    local learning_early_bonus = item.learning_early_commit_bonus or 0
+                                    if not direct_edge then
+                                        learned, potential, learning_early_bonus = learning.reward(
+                                            learning_index, learning_mode, raw, text, consumed_end, item)
+                                        if learned > 0 or potential > 0 then learning_affected = true end
+                                    end
                                     add_state(states[consumed_end], {
                                         score = score + learned - (item.learning_score or 0),
                                         learning_score = learned,
                                         learning_potential = potential,
+                                        learning_early_commit_bonus = learning_early_bonus,
                                         mass_score = (item.mass_score or item.score) +
                                             score - item.score - supplement_added -
                                             whole_input_single_character_reward_added,
@@ -1754,6 +1803,8 @@ local function expand_range(raw, states, from_pos, length, minimum_consumed_end)
                                         prev2 = prev2,
                                         prev1 = prev1,
                                         max_rank = math.max(item.max_rank or 1, candidate.r),
+                                        source_mask = direct_edge and learning.source_direct or learning.source_composed,
+                                        direct_rank = direct_edge and candidate.r or math.huge,
                                         supplement_state = supplement_state,
                                         supplement_score = (item.supplement_score or 0.0) +
                                             supplement_added,
@@ -1766,6 +1817,8 @@ local function expand_range(raw, states, from_pos, length, minimum_consumed_end)
                                             (candidate.primary_single or selected_rank > 0),
                                         edge_code_length = protect_primary_rare and code_length or nil,
                                         text_length = #text,
+                                        text_char_count = (utf8 and utf8.len and item.text_char_count) and
+                                            item.text_char_count + #chars or nil,
                                         raw_length = consumed_end,
                                         edge_count = (item.edge_count or 0) + 1
                                     })
@@ -1817,19 +1870,39 @@ local function evaluate_state(item)
     -- legacy text-only isolation term so the heuristic cannot manufacture a
     -- high-share early commit.
     local confidence_ending_adjustment = eos_score - isolation_penalty(item.text)
+    local confidence_score = (item.mass_score or item.score) + confidence_ending_adjustment
+    local direct = learning.candidate_is_direct(item)
+    local personalization = math.min(ranking_prior.personalized_early_commit_cap,
+        ranking_prior.supplement_early_commit_contribution(item.supplement_score or 0) +
+        (direct and 0 or (item.learning_early_commit_bonus or 0)))
     return {
-        score = item.score + ending_adjustment,
-        confidence_score = (item.mass_score or item.score) + confidence_ending_adjustment,
+        score = item.score + ending_adjustment - (direct and (item.learning_score or 0) or 0),
+        confidence_score = confidence_score,
+        early_commit_confidence_score = confidence_score + personalization,
         text = item.text,
         prev2 = item.prev2,
         prev1 = item.prev1,
         max_rank = math.max(1, item.max_rank or 1),
         supplement_score = item.supplement_score or 0.0,
         code_score = item.code_score or 0.0,
-        learning_score = item.learning_score or 0,
+        learning_score = direct and 0 or (item.learning_score or 0),
+        source_mask = item.source_mask or 0,
+        direct_rank = item.direct_rank or math.huge,
         edge_count = item.edge_count or 0,
         path = item
     }
+end
+
+-- Partial tails are probability evidence, not menu candidates. Preserve the
+-- exact confidence operation order, but do not compute unused ranking priors.
+local function evaluate_evidence_state(item)
+    local confidence_ending_adjustment = logp(item.prev2, item.prev1, EOS) - isolation_penalty(item.text)
+    local base_confidence = (item.mass_score or item.score) + confidence_ending_adjustment
+    local personalization = math.min(ranking_prior.personalized_early_commit_cap,
+        ranking_prior.supplement_early_commit_contribution(item.supplement_score or 0) +
+        (learning.candidate_is_direct(item) and 0 or (item.learning_early_commit_bonus or 0)))
+    return {text=item.text, path=item, confidence_score=base_confidence,
+        early_commit_confidence_score=base_confidence + personalization}
 end
 
 local function add_early_commit_pool_candidate(pool, pool_index, candidate)
@@ -1850,10 +1923,12 @@ local function add_early_commit_pool_candidate(pool, pool_index, candidate)
     end
     local previous = pool[position]
     local combined = logsumexp(previous.confidence_score, candidate.confidence_score)
+    local combined_early = logsumexp(ranking_prior.early_confidence(previous), ranking_prior.early_confidence(candidate))
     -- Copy only on a collision: completed candidates also belong to the menu
     -- and must not have their probability mass changed by dropped-tail merges.
-    local best = candidate.confidence_score > previous.confidence_score and candidate or previous
-    pool[position] = {text=best.text, confidence_score=combined, path=best.path}
+    local best = ranking_prior.early_confidence(candidate) > ranking_prior.early_confidence(previous) and candidate or previous
+    pool[position] = {text=best.text, confidence_score=combined,
+        early_commit_confidence_score=combined_early, path=best.path}
 end
 
 -- Per-(text prefix, raw boundary) evidence, mirroring
@@ -1861,32 +1936,20 @@ end
 -- candidate and raw boundary so negligible crossing paths cannot veto an
 -- otherwise closed boundary.
 local function build_prefix_evidence(pool)
-    local prefixes = {}
-    if #pool == 0 then
-        return prefixes
-    end
-    local max_score = pool[1].confidence_score or pool[1].score
+    if #pool == 0 then return {} end
+    local base_max, early_max = pool[1].confidence_score or pool[1].score, ranking_prior.early_confidence(pool[1])
     for i = 2, #pool do
-        local score = pool[i].confidence_score or pool[i].score
-        if score > max_score then
-            max_score = score
-        end
+        base_max = math.max(base_max, pool[i].confidence_score or pool[i].score)
+        early_max = math.max(early_max, ranking_prior.early_confidence(pool[i]))
     end
-    local total = 0
-    local weights = {}
-    for i = 1, #pool do
-        weights[i] = math.exp((pool[i].confidence_score or pool[i].score) - max_score)
-        total = total + weights[i]
-    end
-    if total <= 0 then
-        return prefixes
-    end
-    local mass_by_boundary = {}
-    local order = {}
-    local boundary_mass = {}
+    local base_total, early_total = 0, 0
+    local mass_by_boundary, order, base_boundary_mass = {}, {}, {}
     for i = 1, #pool do
         local item = pool[i]
-        local weight = weights[i]
+        local base_weight = math.exp((item.confidence_score or item.score) - base_max)
+        local early_weight = math.exp(ranking_prior.early_confidence(item) - early_max)
+        base_total = base_total + base_weight
+        early_total = early_total + early_weight
         local state = item.path
         while state do
             local prefix_text = state.text
@@ -1896,40 +1959,30 @@ local function build_prefix_evidence(pool)
             end
             if prefix_text ~= "" and #prefix_text <= #item.text then
                 local boundary = mass_by_boundary[state.raw_length]
-                if not boundary then
-                    boundary = {}
-                    mass_by_boundary[state.raw_length] = boundary
-                end
+                if not boundary then boundary = {}; mass_by_boundary[state.raw_length] = boundary end
                 local entry = boundary[prefix_text]
                 if not entry then
-                    entry = {
-                        text = prefix_text,
-                        raw_length = state.raw_length,
-                        weight = 0.0,
-                        text_char_count = utf_length(prefix_text)
-                    }
-                    boundary[prefix_text] = entry
-                    order[#order + 1] = entry
+                    entry = {text=prefix_text,raw_length=state.raw_length,base_weight=0.0,early_weight=0.0,
+                        text_char_count=state.text_char_count or utf_length(prefix_text)}
+                    boundary[prefix_text] = entry; order[#order + 1] = entry
                 end
-                entry.weight = entry.weight + weight
-                -- Raw lengths strictly increase along a path, so a candidate
-                -- can visit each boundary only once.
-                boundary_mass[state.raw_length] =
-                    (boundary_mass[state.raw_length] or 0) + weight
+                entry.base_weight = entry.base_weight + base_weight
+                entry.early_weight = entry.early_weight + early_weight
+                base_boundary_mass[state.raw_length] = (base_boundary_mass[state.raw_length] or 0) + base_weight
             end
             state = state.previous
         end
     end
+    if base_total <= 0 or early_total <= 0 then return {} end
     for i = 1, #order do
         local entry = order[i]
-        local boundary_share = (boundary_mass[entry.raw_length] or 0) / total
-        entry.share = entry.weight / total
+        local boundary_share = (base_boundary_mass[entry.raw_length] or 0) / base_total
+        entry.share = entry.early_weight / early_total
+        entry.base_share = entry.base_weight / base_total
         entry.boundary_share = boundary_share
         entry.boundary_closed = boundary_share >= early_commit_closed_boundary_share
-        entry.weight = nil
+        entry.base_weight, entry.early_weight = nil, nil
     end
-    -- Keep the lookup table we already built; the array preserves the exact
-    -- evidence and floating-point accumulation order used by callers.
     order._by_boundary = mass_by_boundary
     return order
 end
@@ -1976,12 +2029,9 @@ end
 local function build_early_commit_evidence(
     raw, states, completed, completed_truncated, required_text_prefix)
     performance.early_evidence_builds = performance.early_evidence_builds + 1
-    -- A truncated confidence pool is never allowed to advance or preserve an
-    -- early-commit tracker. Avoid materializing thousands of prefix records
-    -- that try_early_commit would immediately discard.
-    if completed_truncated then
-        return truncated_early_commit_evidence()
-    end
+    -- Preserve retained mass for the strong-truncated policy. The commit layer
+    -- still requires model-only strong evidence and never lets personalization
+    -- turn truncated evidence into strong evidence.
     local pool = {}
     local pool_index = {}
     local visible = {}
@@ -2007,7 +2057,7 @@ local function build_early_commit_evidence(
             states[consumed_length] = partial
             local added = false
             for i = 1, #partial do
-                local candidate = evaluate_state(partial[i])
+                local candidate = evaluate_evidence_state(partial[i])
                 if candidate.text and candidate.text ~= "" and
                     (required_text_prefix == "" or
                      candidate.text:sub(1, #required_text_prefix) == required_text_prefix) then
@@ -2017,9 +2067,7 @@ local function build_early_commit_evidence(
             end
             if added then
                 merged_incomplete_tail = true
-                if partial._truncated then
-                    return truncated_early_commit_evidence()
-                end
+                truncated = truncated or (partial._truncated or false)
             end
         end
     end
@@ -2093,6 +2141,76 @@ local function prefer_score_over_lexicon_rank(values)
     return false
 end
 
+function learning.apply_fusion_ordering(raw, candidates)
+    if #candidates < 2 then return candidates end
+    local has_direct = false
+    for i = 1, #candidates do
+        if learning.candidate_is_direct(candidates[i]) then has_direct = true; break end
+    end
+    if not has_direct then return candidates end
+    local base, direct, composed = {}, {}, {}
+    for i = 1, #candidates do
+        local item = candidates[i]
+        if base[item.text] == nil then base[item.text] = i end
+        if learning.candidate_is_direct(item) then direct[#direct + 1] = item
+        else composed[#composed + 1] = item end
+    end
+    table.sort(direct, function(a, b)
+        local ar, br = a.direct_rank or math.huge, b.direct_rank or math.huge
+        if ar ~= br then return ar < br end
+        return (base[a.text] or math.huge) < (base[b.text] or math.huge)
+    end)
+    if #direct == 0 or #composed == 0 then
+        if #composed == 0 then
+            for i = 1, #direct do candidates[i] = direct[i] end
+        end
+        return candidates
+    end
+    -- Private to this merge: no preference can survive a learning/schema epoch.
+    -- Zero is a cached score, not a miss. Avoid constructing/hashing each pair
+    -- repeatedly while its source prefix is promoted.
+    local pair_scores = {}
+    local function pair_score(d, c)
+        if not learning_index or learning_mode == "" then return 0 end
+        local key = (d - 1) * #composed + c
+        local score = pair_scores[key]
+        if score == nil then
+            score = learning.fusion_score(learning_index, learning_mode, raw, direct[d].text, composed[c].text)
+            pair_scores[key] = score
+        end
+        return score
+    end
+    local merged, di, ci = {}, 1, 1
+    while di <= #direct and ci <= #composed do
+        local d, c = direct[di], composed[ci]
+        local direct_prefix, composed_prefix = 0, 0
+        for i = di, #direct do
+            direct_prefix = math.max(direct_prefix,
+                pair_score(i, ci))
+        end
+        for i = ci, #composed do
+            composed_prefix = math.max(composed_prefix,
+                -pair_score(di, i))
+        end
+        local take_direct
+        if direct_prefix > 0 or composed_prefix > 0 then
+            if math.abs(direct_prefix - composed_prefix) > 1e-12 then
+                take_direct = direct_prefix > composed_prefix
+            else
+                take_direct = (base[d.text] or math.huge) < (base[c.text] or math.huge)
+            end
+        else
+            take_direct = (base[d.text] or math.huge) < (base[c.text] or math.huge)
+        end
+        if take_direct then merged[#merged + 1] = direct[di]; di = di + 1
+        else merged[#merged + 1] = composed[ci]; ci = ci + 1 end
+    end
+    while di <= #direct do merged[#merged + 1] = direct[di]; di = di + 1 end
+    while ci <= #composed do merged[#merged + 1] = composed[ci]; ci = ci + 1 end
+    for i = 1, #merged do candidates[i] = merged[i] end
+    return candidates
+end
+
 local function emit(raw, states, length, include_early_commit, required_text_prefix)
     local completed = dedup_limit(states[length], beam_limit_at(length))
     states[length] = completed
@@ -2127,6 +2245,7 @@ local function emit(raw, states, length, include_early_commit, required_text_pre
         end
         table.sort(result, better)
     end
+    learning.apply_fusion_ordering(raw, result)
     result.learning_affected = learning_affected
     result._completed_truncated = completed._truncated or false
     -- Display Top-K is not the probability pool. Retain the scored beam for
@@ -2146,8 +2265,7 @@ local function emit(raw, states, length, include_early_commit, required_text_pre
         neutral_low_confidence = false,
         confidence_truncated = completed._truncated or false
     }
-    if include_early_commit and not learning_affected then
-        -- Menu truncation must not inflate prefix/boundary confidence.
+    if include_early_commit then
         result.early_commit_evidence = build_early_commit_evidence(
             raw,
             states,
@@ -2175,6 +2293,7 @@ local function prefix_evidence_equal(left, right)
             tostring(item.raw_length)]
         if not other or other.boundary_closed ~= item.boundary_closed or
             math.abs((other.share or 0.0) - (item.share or 0.0)) > 1e-9 or
+            math.abs((other.base_share or other.share or 0.0) - (item.base_share or item.share or 0.0)) > 1e-9 or
             math.abs((other.boundary_share or 0.0) - (item.boundary_share or 0.0)) > 1e-9 then
             return false
         end
@@ -2217,6 +2336,7 @@ local function candidates_equal(left, right, display)
         if a.text ~= b.text or (display and a.segmented ~= b.segmented) or
             a.score ~= b.score or
             (a.confidence_score or a.score) ~= (b.confidence_score or b.score) or
+            ranking_prior.early_confidence(a) ~= ranking_prior.early_confidence(b) or
             (a.supplement_score or 0) ~= (b.supplement_score or 0) or
             (a.code_score or 0) ~= (b.code_score or 0) or
             (a.lexical_score or 0) ~= (b.lexical_score or 0) or
@@ -2335,7 +2455,7 @@ local function decode(raw_code, include_early_commit, required_text_prefix, lock
         end
         local states = compatible and cache.states or nil
         if states and cache.raw == raw then
-            if cache.result and not cache.result.learning_affected then
+            if cache.result then
                 cache.result.early_commit_evidence = build_early_commit_evidence(raw, states,
                     cache.result._confidence_candidates, cache.result._completed_truncated, required_text_prefix)
                 cache.includes_early_commit, cache.required = true, required_text_prefix
@@ -2360,7 +2480,7 @@ local function decode(raw_code, include_early_commit, required_text_prefix, lock
             local seed = { text = "", prev2 = BOS, prev1 = BOS, score = 0, mass_score = 0,
                 max_rank = 1, supplement_state = 1, supplement_score = 0,
                 code_score = 0,
-                raw_length = 0, text_length = 0, edge_count = 0 }
+                raw_length = 0, text_length = 0, text_char_count = 0, edge_count = 0 }
             for raw_boundary, text_boundary in locked.boundaries:gmatch("(%d+),(%d+);") do
                 local r, t = tonumber(raw_boundary), tonumber(text_boundary)
                 local edge_text = locked.text:sub(seed.text_length + 1, t)
@@ -2379,6 +2499,8 @@ local function decode(raw_code, include_early_commit, required_text_prefix, lock
                     ranking_prior.canonical_isolation_factor < 1.0
                 local item = { text = locked.text:sub(1, t), previous = seed, edge_chars = chars,
                     raw_length = r, text_length = t, edge_count = seed.edge_count + 1,
+                    text_char_count = (utf8 and utf8.len and seed.text_char_count) and
+                        seed.text_char_count + #chars or nil,
                     prev2 = seed.prev2, prev1 = seed.prev1, score = seed.score,
                     supplement_state = seed.supplement_state,
                     supplement_score = seed.supplement_score,
@@ -2409,8 +2531,10 @@ local function decode(raw_code, include_early_commit, required_text_prefix, lock
                 -- evidence is tracked separately and enters only final rank.
                 item.mass_score = item.score - item.supplement_score -
                     (seed.learning_score or 0)
-                local learned, potential = learning.reward(learning_index, learning_mode, raw, item.text, r, seed)
+                local learned, potential, learning_early_bonus = learning.reward(
+                    learning_index, learning_mode, raw, item.text, r, seed)
                 item.learning_score, item.learning_potential = learned, potential
+                item.learning_early_commit_bonus = learning_early_bonus
                 item.score = item.score + learned - (seed.learning_score or 0)
                 if learned > 0 or potential > 0 then learning_affected = true end
                 seed = item
@@ -2460,7 +2584,7 @@ local function decode(raw_code, include_early_commit, required_text_prefix, lock
         -- Only evidence is missing/different. Keep final scoring, Top-K and
         -- lazily generated display strings for this exact generation.
         local result = decode_cache.result
-        if result and not result.learning_affected then
+        if result then
             result.early_commit_evidence = build_early_commit_evidence(
                 raw, old_states, result._confidence_candidates,
                 result._completed_truncated,
@@ -2652,7 +2776,7 @@ local function prefix_belongs_to_visible(prefix, visible)
     return boundary and boundary[prefix.text] or false
 end
 
-local function retain_trackers_without_counting(trackers, prefixes)
+local function retain_trackers_without_counting(trackers, prefixes, reset_maturity)
     local next_trackers = {}
     for key, tracker in pairs(trackers) do
         local current = find_prefix_evidence(prefixes, tracker.text, tracker.raw_length)
@@ -2660,6 +2784,10 @@ local function retain_trackers_without_counting(trackers, prefixes)
             tracker.gap_count = tracker.gap_count + 1
             if tracker.gap_count <= early_commit_maximum_neutral_gap then
                 tracker.last_share = current.share
+                if reset_maturity then
+                    tracker.evidence_count = 0
+                    tracker.strong_count = 0
+                end
                 next_trackers[key] = tracker
             end
         end
@@ -2677,6 +2805,50 @@ local function tracker_better(left, right)
         return left.last_share > right.last_share
     end
     return left.raw_length < right.raw_length
+end
+
+-- Retained lookahead must be compared after the same number of emitted text
+-- elements, not after the same raw boundary. For example, committing 有 at nv
+-- must also wait until the one-element alternative 郁 at nvt has K raw keys of
+-- suffix evidence. A second edge such as nv|tah must not delay a one-element
+-- commit, because it has already emitted two text elements.
+local function competing_boundary_end(
+    raw, committed_raw_length, proposed_raw_length, target_text_elements)
+    if type(raw) ~= "string" or proposed_raw_length <= committed_raw_length or
+        committed_raw_length < 0 or proposed_raw_length > #raw or
+        type(target_text_elements) ~= "number" or target_text_elements < 1 then
+        return proposed_raw_length
+    end
+    local reachable = {[committed_raw_length] = {[0] = true}}
+    local furthest = proposed_raw_length
+    for start = committed_raw_length, #raw - 1 do
+        local counts = reachable[start]
+        if counts then
+            local maximum = math.min(lexicon_state.max_code_len, #raw - start)
+            for length = 1, maximum do
+                local finish = start + length
+                local entries = lexicon_state.codes[raw:sub(start + 1, finish)]
+                if entries then
+                    for count in pairs(counts) do
+                        for index = 1, #entries do
+                            local next_count = count + utf_length(entries[index].t)
+                            if next_count == target_text_elements then
+                                furthest = math.max(furthest, finish)
+                            elseif next_count < target_text_elements then
+                                local next_counts = reachable[finish]
+                                if not next_counts then
+                                    next_counts = {}
+                                    reachable[finish] = next_counts
+                                end
+                                next_counts[next_count] = true
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end
+    return furthest
 end
 
 local function has_selection_suffix(raw)
@@ -2720,7 +2892,7 @@ local function strong_empty_code_candidate(candidate, eligible, visible_top, poo
             candidate_mass = candidate_mass + mass
         end
     end
-    return total > 0 and candidate_mass / total >= early_commit_strong_share
+    return total > 0 and candidate_mass / total >= ranking_prior.empty_code_strong_share
 end
 
 -- Mirrors InputMethodEngine.GetEmptyCodeAutoCommitCandidate: accept exactly
@@ -3023,7 +3195,10 @@ local function try_empty_code_commit(env, state, full_before, appended_letter)
     end
 
     local required_retain = get_min_retained_raw_length(env)
-    if required_retain > 0 and #full_raw - pending.base_raw_length < required_retain then
+    local pending_commit = pending.candidate_text:sub(#pending.committed_text + 1)
+    local protected_boundary = competing_boundary_end(
+        full_raw, #state.committed_raw, pending.base_raw_length, utf_length(pending_commit))
+    if required_retain > 0 and #full_raw - protected_boundary < required_retain then
         save_transient_state(context, state, env)
         return false
     end
@@ -3064,7 +3239,12 @@ local function reset_early_evidence(state)
     state.last_seen_raw = ""
 end
 
-local function try_commit_mature_prefix(env, state, evidence_raw)
+local function auto_commit_matches_visible_top(visible_top, text)
+    return visible_top == nil or
+        visible_top:sub(1, #text) == text
+end
+
+local function try_commit_mature_prefix(env, state, evidence_raw, visible_top)
     local configured = get_min_retained_raw_length(env)
     local retain = configured > 0
         and math.max(early_commit_retained_raw_length, configured)
@@ -3075,9 +3255,13 @@ local function try_commit_mature_prefix(env, state, evidence_raw)
             tracker.strong_count >= early_commit_required_strong) and
             tracker.raw_length > #state.committed_raw and
             tracker.raw_length <= #evidence_raw and
-            #evidence_raw - tracker.raw_length >= retain and
+            #evidence_raw - competing_boundary_end(
+                evidence_raw, #state.committed_raw, tracker.raw_length,
+                (tracker.text_char_count or utf_length(tracker.text)) -
+                    utf_length(state.committed_text)) >= retain and
             #tracker.text > #state.committed_text and
-            tracker.text:sub(1, #state.committed_text) == state.committed_text then
+            tracker.text:sub(1, #state.committed_text) == state.committed_text and
+            auto_commit_matches_visible_top(visible_top, tracker.text) then
             if not selected or tracker_better(tracker, selected) then
                 selected = tracker
             end
@@ -3139,7 +3323,10 @@ local function try_early_commit(env)
         return
     end
     local early_commit_evidence = decoded.early_commit_evidence or {}
-    if decoded.learning_affected or early_commit_evidence.confidence_truncated then
+    local truncated = early_commit_evidence.confidence_truncated or false
+    -- Learning can affect which paths survive the Beam. If that same pool is
+    -- truncated, even model-only BaseShare may be conditionally inflated.
+    if decoded.learning_affected and truncated then
         reset_early_evidence(state)
         save_transient_state(context, state, env)
         return
@@ -3147,9 +3334,14 @@ local function try_early_commit(env)
     -- The decode above ran synchronously for exactly this raw code, so the
     -- evidence generation always matches the live composition.
     local evidence_raw = full_raw
+    -- Confidence intentionally excludes final-stage ranking priors. It can
+    -- authorize a commit only when the committed text is still a prefix of
+    -- the candidate displayed first after those priors rerank the menu. nil
+    -- preserves merged incomplete-tail evidence with no display candidate.
+    local visible_top = #decoded > 0 and decoded[1].text or nil
 
     if state.last_seen_raw == evidence_raw then
-        try_commit_mature_prefix(env, state, evidence_raw)
+        try_commit_mature_prefix(env, state, evidence_raw, visible_top)
         return
     end
 
@@ -3162,22 +3354,19 @@ local function try_early_commit(env)
     state.last_seen_raw = evidence_raw
 
     local prefixes = early_commit_evidence.prefixes or {}
-    local accepted_top = nil
-    if #decoded > 0 and (decoded[1].supplement_score or 0.0) > 0.0 then
-        accepted_top = decoded[1].text
-    end
-
     local merged_incomplete_tail = early_commit_evidence.merged_incomplete_tail or false
     local qualifying = {}
     for i = 1, #prefixes do
         local prefix = prefixes[i]
+        local base_share = prefix.base_share or prefix.share or 0
         if prefix.text and prefix.text ~= "" and
             prefix.boundary_closed and
             prefix.share >= early_commit_minimum_share and
+            (not truncated or base_share >= early_commit_strong_share) and
             prefix.raw_length > #state.committed_raw and
             #prefix.text > #state.committed_text and
             prefix.text:sub(1, #state.committed_text) == state.committed_text and
-            (accepted_top == nil or accepted_top:sub(1, #prefix.text) == prefix.text) and
+            auto_commit_matches_visible_top(visible_top, prefix.text) and
             (merged_incomplete_tail or prefix_belongs_to_visible(prefix, decoded)) then
             qualifying[prefix.text .. state_separator .. tostring(prefix.raw_length)] = prefix
         end
@@ -3188,9 +3377,10 @@ local function try_early_commit(env)
     if retain_without_counting then
         -- Comparison-only gap: keep supported trackers alive without letting
         -- them gain evidence, for at most three consecutive generations.
-        state.trackers = retain_trackers_without_counting(state.trackers, prefixes)
+        state.trackers = retain_trackers_without_counting(
+            state.trackers, prefixes, early_commit_evidence.neutral_low_confidence)
         save_transient_state(context, state, env)
-        try_commit_mature_prefix(env, state, evidence_raw)
+        try_commit_mature_prefix(env, state, evidence_raw, visible_top)
         return
     end
 
@@ -3210,7 +3400,8 @@ local function try_early_commit(env)
         end
         tracker.evidence_count = math.min(
             early_commit_required_evidence, tracker.evidence_count + 1)
-        tracker.strong_count = prefix.share >= early_commit_strong_share
+        local base_share = prefix.base_share or prefix.share or 0
+        tracker.strong_count = base_share >= early_commit_strong_share
             and math.min(early_commit_required_strong, tracker.strong_count + 1)
             or 0
         tracker.gap_count = 0
@@ -3219,7 +3410,7 @@ local function try_early_commit(env)
     end
     state.trackers = next_trackers
     save_transient_state(context, state, env)
-    try_commit_mature_prefix(env, state, evidence_raw)
+    try_commit_mature_prefix(env, state, evidence_raw, visible_top)
 end
 
 local function is_plain_char_key(key_event, repr)
@@ -3255,11 +3446,17 @@ local function learning_selection(env, state)
     local target = segment and segment.selected_index or 0
     local results = decode(raw, false, state.committed_text, active_lock(state))
     local first, selected, visible = nil, nil, 0
+    local seen = {}
     for _, item in ipairs(results) do
         if implicit_rank_allowed(item, raw, state.continuation_after_auto_commit) and
             item.text:sub(1, #state.committed_text) == state.committed_text and #item.text > #state.committed_text then
             first = first or item
-            if visible == target then selected = item end
+            if visible == target then
+                selected = item
+                selected._fusion_ahead = {}
+                for i = 1, #seen do selected._fusion_ahead[i] = seen[i] end
+            end
+            seen[#seen + 1] = item
             visible = visible + 1
         end
     end
@@ -3272,12 +3469,28 @@ end
 local function learning_stage(env, state, selected, raw, submitted_first)
     local live = env._tiger_learning
     if not live or live.mode == "" or not selected then return end
+
+    -- Cross-source learning is pairwise and never mutates either source's
+    -- internal ordering. Selecting a lower Direct candidate over an earlier
+    -- Composed candidate records only Direct > Composed (and vice versa).
+    for _, ahead in ipairs(selected._fusion_ahead or {}) do
+        local event
+        if learning.candidate_is_direct(selected) and learning.candidate_is_composed_only(ahead) then
+            event = learning.fusion_event(live.mode, raw, selected.text, ahead.text, true,
+                selected.path and selected.path.raw_length or #raw)
+        elseif learning.candidate_is_composed_only(selected) and learning.candidate_is_direct(ahead) then
+            event = learning.fusion_event(live.mode, raw, ahead.text, selected.text, false,
+                selected.path and selected.path.raw_length or #raw)
+        end
+        if event and #live.pending < 256 then live.pending[#live.pending + 1] = event end
+    end
+
     local baseline = state.tab_pending and live.baseline or
         (not state.tab_pending and submitted_first)
-    if baseline then
+    if baseline and learning.candidate_is_composed_only(baseline) and learning.candidate_is_composed_only(selected) then
         local lock = active_lock(state)
-        local events = learning.diff(raw, baseline, selected,
-            math.max(#state.committed_raw, lock and #lock.raw or 0), live.mode)
+        local floor = math.max(#state.committed_raw, lock and #lock.raw or 0)
+        local events = learning.diff(raw, baseline, selected, floor, live.mode)
         for _, e in ipairs(events) do if #live.pending < 256 then live.pending[#live.pending + 1] = e end end
     end
     live.baseline = nil
@@ -3288,8 +3501,10 @@ learning_submit = function(env, selected, actual, expected)
     if not live then return end
     local events, remaining = {}, {}
     if selected and actual ~= "" and actual == expected and live.mode ~= "" then
+        local fusion_mode = learning.fusion_mode(live.mode)
         for _, e in ipairs(live.pending) do
             if e.raw_end > selected.path.raw_length then remaining[#remaining + 1] = e
+            elseif e.mode == fusion_mode then events[#events + 1] = e
             elseif e.mode == live.mode and e.text_start >= #selected.text - #expected and
                 selected.text:sub(e.text_start + 1, e.text_end) == e.text then events[#events + 1] = e end
         end
@@ -3306,7 +3521,7 @@ local function prepare_learning(env, attach)
         local ok, value = pcall(function() return schema.config:get_bool("tiger_sentence/tab_learning") end)
         if ok and value == false then enabled = false end
     end
-    local mode = enabled and ("sentence-v1|rules=" .. (lexicon_state.learning_rules or "") ..
+    local mode = enabled and ("sentence-v2|rules=" .. (lexicon_state.learning_rules or "") ..
         "|optimal=" .. tostring(lexicon_state.high_freq_limit) .. "|dup=" .. (active_allow_duplicate_single and "1" or "0")) or ""
     local schema_id = schema and schema.schema_id or "tiger_sentence"
     if env._tiger_learning_schema_id ~= schema_id then
@@ -3474,12 +3689,18 @@ local function processor(key_event, env)
             local segment = composition and not composition:empty() and composition:back()
             local target = segment and segment.selected_index or 0
             local decoded = decode(full_before, false, state.committed_text, active_lock(state))
-            local selected, visible = nil, 0
+            local selected, visible, seen = nil, 0, {}
             for _, item in ipairs(decoded) do
                 if implicit_rank_allowed(item, full_before, state.continuation_after_auto_commit) and
                     item.text:sub(1, #state.committed_text) == state.committed_text and
                     #item.text > #state.committed_text then
-                    if visible == target then selected = item; break end
+                    if visible == target then
+                        selected = item
+                        selected._fusion_ahead = {}
+                        for i = 1, #seen do selected._fusion_ahead[i] = seen[i] end
+                        break
+                    end
+                    seen[#seen + 1] = item
                     visible = visible + 1
                 end
             end
@@ -3534,13 +3755,17 @@ local function processor(key_event, env)
         return 2
     end
     local codepoint = key_event.keycode
-    if state.buffered_text ~= "" and type(codepoint) == "number" and
+    if context:has_menu() and type(codepoint) == "number" and
         codepoint >= 33 and codepoint <= 126 and
         string.char(codepoint):match("%p") and
         not key_event:ctrl() and not key_event:alt() and not key_event:super() then
-        -- Letters and rank selectors were handled above. Flush this complete
-        -- composition BEFORE punctuator creates/closes another Rime segment;
-        -- then let the configured punctuation table handle the original key.
+        -- Letters and rank selectors were handled above. Submit while the
+        -- sentence menu/raw input still identifies the corrected path. Once
+        -- punctuator appends its segment, learning_selection cannot decode
+        -- that input (e.g. zhhbi,) or recover the sentence's selected index.
+        -- Keep punctuation handling in the configured Rime punctuator.
+        local selected, _, raw = learning_selection(env, state)
+        learning_stage(env, state, selected, raw)
         context:confirm_current_selection()
         return 2
     end
@@ -3837,6 +4062,8 @@ end
 M.prefix_extends = prefix_extends
 M.prefix_contradicted = prefix_contradicted
 M.retain_trackers_without_counting = retain_trackers_without_counting
+M.auto_commit_matches_visible_top = auto_commit_matches_visible_top
+M.competing_boundary_end = competing_boundary_end
 M.performance_status = function()
     return {
         current = {
@@ -3970,6 +4197,7 @@ M.reverse_comment_filter = function(input, env)
     end
 end
 M.learning = learning
+M.apply_fusion_ordering_for_test = learning.apply_fusion_ordering
 M.set_learning_for_test = function(index, mode)
     learning_index, learning_mode = index, mode or ""
     reset_decode_cache()

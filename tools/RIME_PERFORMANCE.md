@@ -73,8 +73,8 @@ python3 tools/run_regressions.py --lua lua --negative-control
 ```
 
 The learning regression compares runtime exact/prefix scores against full replay
-through corrections, competing choices, time decay, caps, multiple contexts/modes,
-old snapshots, clock changes and partial/failed writes. It also rejects a hot-path
+through corrections, competing choices, persistent level caps, multiple contexts/modes,
+old snapshots, clock changes and partial/failed writes. Clock changes are verified to leave learning scores unchanged. It also rejects a hot-path
 replay on a 10,000-record fixture and checks old/new hashes on all byte values.
 An additional before/after run compared 8,072 append/backspace generations from
 six fixed inputs and 100 deterministic random 40-key inputs with the real model;

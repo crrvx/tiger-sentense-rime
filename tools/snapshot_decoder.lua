@@ -1,6 +1,8 @@
 -- Run this *same* probe in separate Lua processes for old and new sources.
 -- Stable behavior-only serialization deliberately ignores cache/layout fields.
 local source, data, mode, random_cases = arg[1], arg[2], arg[3], tonumber(arg[4]) or 20
+local ignore_early_evidence = arg[8] == "ignore-early-evidence"
+local ignore_learning_behavior = arg[9] == "ignore-learning-behavior"
 package.path=source.."/lua/?.lua;"..package.path
 rime_api={get_user_data_dir=function()return data end}
 os.time=function()return 1800000000 end
@@ -36,6 +38,8 @@ local function path(item)
     local value={raw=item.raw_length,text_length=item.text_length,text=item.text,
         prev2=item.prev2,prev1=item.prev1,score=item.score,mass=item.mass_score or item.score,
         learning=item.learning_score or 0,potential=item.learning_potential or 0,
+        early_bonus=item.learning_early_commit_bonus or 0,source=item.source_mask or 0,
+        direct_rank=(item.direct_rank and item.direct_rank ~= math.huge) and item.direct_rank or "none",code_score=item.code_score or 0,
         rank=item.max_rank or 1,edges=item.edge_count or 0,supplement=item.supplement_score or 0,parent=parent}
     local key=canonical(value)
     local id=path_ids[key]
@@ -49,6 +53,9 @@ local function candidates(items,display)
     for i,item in ipairs(items or {})do
         values[i]={text=item.text,score=item.score,confidence=item.confidence_score or item.score,
             learning=item.learning_score or 0,supplement=item.supplement_score or 0,
+            early_confidence=item.early_commit_confidence_score or item.confidence_score or item.score,
+            source=item.source_mask or 0,direct_rank=(item.direct_rank and item.direct_rank ~= math.huge) and item.direct_rank or "none",
+            code_score=item.code_score or 0,lexical_score=item.lexical_score or 0,
             rank=item.max_rank or 1,edges=item.edge_count or 0,path=path(item.path),
             segmented=display and item.segmented or nil}
     end
@@ -63,16 +70,19 @@ local function capture(label,raw,evidence,required,lock)
     local e=result.early_commit_evidence or {}
     local prefixes={}
     for i,p in ipairs(e.prefixes or {})do
-        prefixes[i]={text=p.text,raw=p.raw_length,share=p.share,boundary_share=p.boundary_share,closed=p.boundary_closed}
+        prefixes[i]={text=p.text,raw=p.raw_length,share=p.share,base_share=p.base_share or p.share,
+            chars=p.text_char_count, boundary_share=p.boundary_share,closed=p.boundary_closed}
     end
     path_nodes,path_ids,path_seen={},{},{}
     local menu=candidates(result,true)
     local pool=candidates(result._confidence_candidates,false)
     local snapshot={label=label,raw=raw,menu=menu,pool=pool,paths=path_nodes,
-        learning=result.learning_affected or false,truncated=result._completed_truncated or false,
-        evidence={prefixes=prefixes,proposal=e.proposal or "",share=e.proposal_share or 0,raw_lengths=e.raw_lengths or {},
+        learning=result.learning_affected or false,truncated=result._completed_truncated or false}
+    if not ignore_early_evidence then
+        snapshot.evidence={prefixes=prefixes,proposal=e.proposal or "",share=e.proposal_share or 0,raw_lengths=e.raw_lengths or {},
             truncated=e.confidence_truncated or false,neutral_tail=e.neutral_incomplete_tail or false,
-            merged_tail=e.merged_incomplete_tail or false,neutral_low=e.neutral_low_confidence or false}}
+            merged_tail=e.merged_incomplete_tail or false,neutral_low=e.neutral_low_confidence or false}
+    end
     io.write(canonical(snapshot),"\n");count=count+1
     return result
 end
@@ -93,7 +103,8 @@ end
 for i=1,300 do
     events[#events+1]={code="ueot"..string.format("%04d",i),text="的是甲",context="",mode="snapshot",time=os.time()}
 end
-for _,learned in ipairs({false,true})do
+local learned_modes = ignore_learning_behavior and {false} or {false,true}
+for _,learned in ipairs(learned_modes)do
     for _,duplicate in ipairs({false,true})do
         sentence.set_allow_duplicate_single({get_option=function()return duplicate end})
         sentence.set_learning_for_test(learned and learning.runtime_index(events,os.time()) or nil,learned and "snapshot" or "")

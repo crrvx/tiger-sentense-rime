@@ -37,11 +37,22 @@ local function run(raw,times)
 end
 for _,raw in ipairs({'jaefmonyftuderlmljgbmnvs','jeumbauefaalhngyoehiyfbmvmxfzbflrl','nnczggqrrjrrltwwbwkedmkswgjgiuapnphbszbp'})do run(raw);phase('input_'..#raw)end
 local seed,times=20260914,{}
+local allocation_calls, allocation_growth
+if __allocations then allocation_calls, allocation_growth=__allocations() end
 local function rnd(n)seed=seed*48271%2147483647;return seed%n+1 end
 for j=1,bursts do
  local chars={};for i=1,40 do chars[i]=string.char(96+rnd(26))end
  run(table.concat(chars),times)
  if j==1 or j==20 or j==bursts then phase('random_'..j)end
+end
+if __allocations then
+ local calls,growth=__allocations()
+ print(string.format('{"allocation_phase":"random_bursts","calls":%.0f,"growth_bytes":%.0f}',
+   calls-allocation_calls,growth-allocation_growth))
+end
+if s.performance_status then
+ local stats=s.performance_status().current
+ print(string.format('{"lookup_phase":"random_bursts","page_misses":%.0f,"page_bytes":%.0f}',stats.page_misses,stats.page_bytes))
 end
 local total=0;for _,v in ipairs(times)do total=total+v end;table.sort(times)
 print(string.format('{"timing":"40-key bursts including evidence and segmentation","keys":%d,"mean_cpu_ms":%.6f,"p95_cpu_ms":%.6f,"p99_cpu_ms":%.6f,"max_cpu_ms":%.6f}',#times,total/#times,times[math.ceil(#times*.95)],times[math.ceil(#times*.99)],times[#times]))
