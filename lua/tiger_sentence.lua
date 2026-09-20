@@ -3671,6 +3671,33 @@ local function processor(key_event, env)
             return 1
         end
         local is_letter = ch:match("^[a-z]$") ~= nil
+        -- Reverse-lookup input (`-prefixed) must never take selector keys into
+        -- the pinyin: speller's alphabet would append them and break the
+        -- lookup segment. Digits select-and-commit here; semicolon is inert.
+        if not is_letter and context.input:sub(1, 1) == "`" then
+            if ch:match("%d") then
+                learned.pending, learned.baseline = {}, nil
+                local composition = context.composition
+                local segment = composition and not composition:empty() and composition:back()
+                local menu = segment and segment.menu
+                local index = tonumber(ch) - 1
+                local count = menu and (type(menu.prepare) == "function"
+                    and menu:prepare(candidate_limit) or menu:candidate_count())
+                if count and index >= 0 and index < count then
+                    -- Highlight + confirm mirrors Space; Context:select() may
+                    -- commit a whole-composition sentence instead.
+                    if not (type(context.highlight) == "function" and context:highlight(index)) then
+                        segment.selected_index = index
+                    end
+                    context:confirm_current_selection()
+                end
+                reset_sentence_state(context, env)
+                return 1
+            end
+            if ch == ";" then
+                return 1
+            end
+        end
         local live_before = live_input(context)
         local caret = input_caret(context)
         local full_before = state.committed_raw .. live_before
