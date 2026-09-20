@@ -3433,13 +3433,7 @@ local function learning_stage(env, state, selected, raw, submitted_first)
     if baseline and learning.candidate_is_composed_only(baseline) and learning.candidate_is_composed_only(selected) then
         local lock = active_lock(state)
         local floor = math.max(#state.committed_raw, lock and #lock.raw or 0)
-        local events
-        if not state.tab_pending and submitted_first and selected.text == submitted_first.text and
-            live.store and live.store.index then
-            events = learning.reinforce(live.store.index, live.mode, raw, selected, floor)
-        else
-            events = learning.diff(raw, baseline, selected, floor, live.mode)
-        end
+        local events = learning.diff(raw, baseline, selected, floor, live.mode)
         for _, e in ipairs(events) do if #live.pending < 256 then live.pending[#live.pending + 1] = e end end
     end
     live.baseline = nil
