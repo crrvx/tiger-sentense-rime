@@ -593,8 +593,9 @@ for _, mapping in ipairs({
 end
 print("OK  idle punctuation is delegated to the symbols.yaml preset")
 
--- Reverse-lookup input (`-prefixed) must never take selector keys into the
--- pinyin; digits select-and-commit the highlighted candidate instead.
+-- Reverse-lookup input (`-prefixed) keeps selector keys out of the pinyin:
+-- digits select-and-commit, semicolon is inert, apostrophe is kept so the
+-- engine can split syllables by the schema delimiter.
 local env_rev, context_rev, _, _, menu_rev, segment_rev = fake_environment(false)
 context_rev.input = "`ni"
 menu_rev.count = 3
@@ -611,7 +612,11 @@ context_rev.input = "`ni"
 if sentence.processor(fake_key("semicolon"), env_rev) ~= 1 or context_rev.input ~= "`ni" then
     fail("reverse-lookup semicolon escaped into the pinyin input")
 end
-print("OK  reverse-lookup digits commit candidates and never join the input")
+context_rev.input = "`xi"
+if sentence.processor(fake_key("apostrophe"), env_rev) ~= 1 or context_rev.input ~= "`xi'" then
+    fail("reverse-lookup apostrophe was not kept for syllable splitting")
+end
+print("OK  reverse-lookup digits commit; semicolon inert, apostrophe kept")
 
 local env_tab, context_tab, _, _, menu_tab, segment_tab = fake_environment(false)
 context_tab.input = "rl"

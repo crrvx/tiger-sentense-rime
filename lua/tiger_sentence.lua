@@ -3674,6 +3674,8 @@ local function processor(key_event, env)
         -- Reverse-lookup input (`-prefixed) must never take selector keys into
         -- the pinyin: speller's alphabet would append them and break the
         -- lookup segment. Digits select-and-commit here; semicolon is inert.
+        -- The apostrophe is kept so the engine can split syllables by the
+        -- schema delimiter once librime honors it (upstream fix).
         if not is_letter and context.input:sub(1, 1) == "`" then
             if ch:match("%d") then
                 learned.pending, learned.baseline = {}, nil
