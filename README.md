@@ -11,7 +11,7 @@
 
 - 字母连续输入整句编码，空格上屏；变长编码 lattice + Beam 解码。
 - 明文码表/字频/白名单（txt），可直接编辑或导入其它形码码表。
-- 可选 Kneser-Ney n-gram 语言模型（TCSKNM02 分页格式，Lua 直接读取）；
+- 可选 Kneser-Ney n-gram 语言模型（默认 TCSKNM03 五阶分页格式，纯 Lua 直接读取；兼容旧 TCSKNM02 三阶）；
   无模型时自动降级为「码表名次 → 更少码表边 → 分数」排序。
 - 形码证据与约 146.5 KiB 的紧凑词先验只重排现有候选，不扩 Beam、
   不进入自动上屏置信度，也不扩大 214 MiB 语言模型。
@@ -38,8 +38,8 @@
 
 3. 在已有的 `default.custom.yaml` 的 schema_list 中加入 `tiger_sentence`
    （本包附带示例）。
-4. （可选）把 `sentence-ngram-mobile.bin` 放入用户目录 `models/`，
-   见下节。
+4. （可选）把 `sentence-fivegram-mobile.bin` 放入用户目录 `models/`，
+   见下节。旧 `sentence-ngram-mobile.bin` 仍可作为兼容回退。
 5. 「重新部署」，然后切换到 虎整句。
 
 ## 纠正学习与兼容性
@@ -70,16 +70,25 @@
 
 ## 语言模型（可选）
 
-模型文件 `sentence-ngram-mobile.bin`（TCSKNM02，约 448 MiB）从本仓库
-[Releases](https://github.com/lvyww/tiger-sentense-rime/releases) 下载，放入用户目录 `models/`。查找顺序：用户目录 `models/` →
-用户目录根部 → 共享目录 `models/`。
+默认模型为 `sentence-fivegram-mobile.bin`（TCSKNM03），放入用户目录 `models/`。
+TCSKNM03 是纯 Lua 直接读取的字符五阶模型：Beam 每条路径保存最近四个字符历史，
+BOS/EOS 都参与评分；同一文件同时提供孤立字先验需要的 observed-bigram 查询，
+不再需要为了这一先验额外常驻旧三阶模型。格式、构建与分页缓存见
+[`docs/TCSKNM03.md`](docs/TCSKNM03.md)。
 
-2026-09-20 Rime 默认模型切换为 full-kn-m5-v2，469,886,928 字节（448.12 MiB），
-SHA256：`c0063898fdff27c1fb00c1c72fa28a6c1b375fade1ec2045d731b9db958bdecc`。
-格式和文件名不变，仍默认 compact。旧/新两组各一万句离线首选准确率分别为
-99.41% / 99.52%，合计 99.465%；样本已参与模型选择，不是独立验收集。
-单模型同参数 7z 为 162.98 MiB。默认模型身份见 `default-model.json`。
-公开 Release 附件尚未更新，请以附件校验值为准。
+2026-09-22 默认模型 `brightmart-char5-context128-tcs3-q16` 为 460,693,519 字节
+（439.35 MiB），SHA256：
+`4e6d79b957a55edf35cd9e2e66c62bd0bbe598581b7dc088b462122a713172a7`。
+它与虎爪 419,929,926 字节压缩五阶使用相同的 context-vocabulary=128 剪枝规则；
+1–3 阶全保留，4–5 阶只保留高频历史分布。各阶保留记录数为
+21,230 / 7,959,327 / 69,562,625 / 10,273,459 / 8,415,769。
+冻结 20k 形码集首选为旧集 99.59%、新集 99.71%，合计 99.650%（19,930/20,000）；
+与虎爪当前 420 MB KenLM Q8 压缩版相比净多命中 4 句。两种量化并非逐分/逐句等价，
+详细差异与验收口径见 `docs/TCSKNM03.md`。
+
+查找顺序优先 TCSKNM03：用户目录 `models/` → 用户目录根部 → 共享目录 `models/`；
+若不存在则继续查找旧 `sentence-ngram-mobile.bin`（TCSKNM02）和旧格式模型，
+因此只更新源码但不更新模型时仍可使用原三阶行为。默认模型身份见 `default-model.json`。
 
 没有模型时方案完全可用：解码按码表名次优先，整码单字不会被多段拼接
 压过；语言模型排序、紧凑排序先验与提前上屏的置信度计算一并禁用。

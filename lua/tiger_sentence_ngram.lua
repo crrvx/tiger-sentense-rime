@@ -8,6 +8,7 @@ local CONTEXT_CACHE_ENTRIES = 16384
 local INDEX_PAGE_RECORDS = 256 -- 4 KiB of the existing 16-byte sparse index
 local INDEX_CACHE_PAGES = 64
 local memo = require("tiger_sentence_cache")
+local fivegram = require("tiger_sentence_fivegram")
 local M = {}
 function M.new(performance)
 local kn_reader = {
@@ -31,12 +32,15 @@ function kn_reader.candidate_paths()
         local user_dir = rime_api.get_user_data_dir and rime_api.get_user_data_dir()
         local shared_dir = rime_api.get_shared_data_dir and rime_api.get_shared_data_dir()
         if user_dir and user_dir ~= "" then
+            mobile_paths[#mobile_paths + 1] = user_dir .. "/models/sentence-fivegram-mobile.bin"
+            mobile_paths[#mobile_paths + 1] = user_dir .. "/sentence-fivegram-mobile.bin"
             mobile_paths[#mobile_paths + 1] = user_dir .. "/models/sentence-ngram-mobile.bin"
             mobile_paths[#mobile_paths + 1] = user_dir .. "/sentence-ngram-mobile.bin"
             legacy_paths[#legacy_paths + 1] = user_dir .. "/models/sentence-ngram-v2.bin"
             legacy_paths[#legacy_paths + 1] = user_dir .. "/sentence-ngram-v2.bin"
         end
         if shared_dir and shared_dir ~= "" then
+            mobile_paths[#mobile_paths + 1] = shared_dir .. "/models/sentence-fivegram-mobile.bin"
             mobile_paths[#mobile_paths + 1] = shared_dir .. "/models/sentence-ngram-mobile.bin"
             legacy_paths[#legacy_paths + 1] = shared_dir .. "/models/sentence-ngram-v2.bin"
         end
@@ -523,6 +527,9 @@ function kn_reader.load(path, limits)
     local file = assert(io.open(path, "rb"), "cannot open n-gram: " .. path)
     local magic = file:read(8)
     file:close()
+    if magic == "TCSKNM03" then
+        return fivegram.load(path, limits)
+    end
     if magic == "TCSKNM02" then
         return load_mobile(path, limits)
     end

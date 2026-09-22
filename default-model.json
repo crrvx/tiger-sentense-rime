@@ -1,8 +1,10 @@
 {
-  "name": "full-kn-m5-v2",
-  "format": "TCSKNM02",
-  "filename": "sentence-ngram-mobile.bin",
-  "bytes": 469886928,
-  "sha256": "c0063898fdff27c1fb00c1c72fa28a6c1b375fade1ec2045d731b9db958bdecc",
-  "profile": "compact"
+  "name": "brightmart-char5-context128-tcs3-q16",
+  "format": "TCSKNM03",
+  "filename": "sentence-fivegram-mobile.bin",
+  "bytes": 460693519,
+  "sha256": "4e6d79b957a55edf35cd9e2e66c62bd0bbe598581b7dc088b462122a713172a7",
+  "profile": "compact",
+  "order": 5,
+  "context_vocabulary": 128
 }

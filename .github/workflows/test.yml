@@ -133,6 +133,8 @@ jobs:
           persist-credentials: false
       - name: Install real Rime development library and Lua plugin
         run: sudo apt-get update && sudo apt-get install -y g++ librime-dev librime-plugin-lua
+      - name: Test TCSKNM03 converter and pure-Lua reader
+        run: python3 tools/test_tcs_knm03.py --lua lua5.4
       - name: Test distribution compatibility and pinned modern preedit host
         shell: bash
         run: |
