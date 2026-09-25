@@ -3538,6 +3538,14 @@ local function learning_stage(env, state, selected, raw, submitted_first)
         local lock = active_lock(state)
         local floor = math.max(#state.committed_raw, lock and #lock.raw or 0)
         local events = learning.diff(raw, baseline, selected, floor, live.mode)
+        local reinforced = learning.reinforce_existing(live.store and live.store.index, raw, baseline, selected, floor, live.mode)
+        for _, e in ipairs(reinforced) do
+            local duplicate = false
+            for _, old in ipairs(events) do
+                if old.mode == e.mode and old.code == e.code and old.text == e.text then duplicate = true; break end
+            end
+            if not duplicate then events[#events + 1] = e end
+        end
         for _, e in ipairs(events) do if #live.pending < 256 then live.pending[#live.pending + 1] = e end end
     end
     live.baseline = nil
