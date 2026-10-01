@@ -32,6 +32,12 @@ local function run()
     check(s.model_status().loaded and oracle.model_status().loaded, 'test model not loaded')
     local c=s.correction; c.set_enabled(true); c.diagnostics_enabled=true
     oracle.correction.set_enabled(true)
+    local function with_budget(steps)
+        local profile = {}
+        for key, value in pairs(c.profiles.A) do profile[key] = value end
+        profile.steps = steps
+        return profile
+    end
     -- Same Beam and merge policy as A; only the independent oracle has no quota.
     oracle.correction.profiles.A.steps=math.huge
     oracle.correction.configure('A')
@@ -57,7 +63,7 @@ local function run()
         local again=s.decode(raw,true,'')
         check(s.results_equal(first,again), 'restoring prefix changed the candidate view')
     end
-    c.profiles.tiny_reuse={seeds=8,one=16,two=8,steps=2}
+    c.profiles.tiny_reuse=with_budget(2)
     c.configure('tiny_reuse'); s.reset_decode_cache()
     check(s.decode('kispfidy',true,'').correction_incomplete, 'forced exhaustion missing')
     local searches=c.stats.searches
@@ -68,7 +74,7 @@ local function run()
         check(s.capture_empty_code_candidate('kispfidy',required)==nil, 'incomplete search authorized early commit')
     end
     for _,budget in ipairs({256,512,1024}) do
-        c.profiles.budget_reuse={seeds=8,one=16,two=8,steps=budget}
+        c.profiles.budget_reuse=with_budget(budget)
         c.configure('budget_reuse')
         for _,raw in ipairs({'kispfidyiejryfenahbmsp','jaefmfmvqcbzlkospfify',
                             ('kospfifyiejryfenahbmsp'):rep(2)}) do

@@ -1,9 +1,10 @@
 -- Optional same-row substitution channel with bounded module-local caches.
 local M = { enabled = false, penalty = 8, search_penalty = 8, margin = 2, cache = {} }
--- Internal experiment profiles, never persisted as user settings. Reference
--- retains the old search/menu for cache-only parity and accuracy comparisons.
+-- A is the production D89 search policy. B/C and reference remain test-only.
+-- Gap limits are per-error search cutoffs, not the user strength penalties.
+-- Missing gap fields retain the count-only policy for independent comparisons.
 M.profiles = {
-    A={seeds=8,one=16,two=8,steps=4096},
+    A={seeds=8,one=16,two=8,steps=4096,delta_one=8,delta_two=9},
     B={seeds=4,one=8,two=4,steps=2048},
     C={seeds=2,one=4,two=2,steps=1024},
     reference={seeds=math.huge,one=64,two=64,long=24,steps=math.huge}
@@ -159,7 +160,23 @@ function M.current(bucket, exact, position)
         table.sort(items, better)
         local limit=budget==1 and profile.one or profile.two
         if position>24 then limit=profile.long or math.max(1,math.floor(limit/2)) end
-        for i = 1, math.min(#items, limit) do result[#result + 1] = items[i] end
+        -- A nil limit disables only this error group's score-gap filter.
+        local delta = profile.delta_one
+        if budget == 2 then delta = profile.delta_two end
+        local cutoff = items[1] and delta and (items[1].score - delta) or -math.huge
+        local kept = 0
+        for i = 1, math.min(#items, limit) do
+            if items[i].score < cutoff then break end
+            result[#result + 1] = items[i]
+            kept = kept + 1
+        end
+        if M.gap_stats then
+            local stats = M.gap_stats
+            stats.calls = stats.calls + 1
+            stats.seen = stats.seen + #items
+            stats[budget] = stats[budget] + kept
+            stats.pruned = stats.pruned + math.min(#items, limit) - kept
+        end
     end
     -- Exact states are borrowed, never changed or removed by correction pruning.
     for i=1,math.min(#(exact or {}),profile.seeds) do result[#result+1]=exact[i] end

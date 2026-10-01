@@ -39,7 +39,7 @@ def temporary_tree():
 def isolated_sources(destination):
     shutil.copytree(PACK / "lua", destination / "lua")
     (destination / "tools").mkdir()
-    for name in ("test_tiger_sentence_incremental.lua", "test_rime_contract.lua", "test_sentence_safety.lua", "test_sentence_learning.lua", "test_review_regressions.lua", "test_ngram_reader.lua", "test_memory.lua", "test_lexical_prior.lua", "test_allocation.lua", "test_key_correction_reuse.lua", "test_early_evidence_gate.lua", "test_empty_commit_correction_off.lua", "test_correction_levels.lua"):
+    for name in ("test_tiger_sentence_incremental.lua", "test_rime_contract.lua", "test_sentence_safety.lua", "test_sentence_learning.lua", "test_review_regressions.lua", "test_ngram_reader.lua", "test_memory.lua", "test_lexical_prior.lua", "test_allocation.lua", "test_key_correction_reuse.lua", "test_early_evidence_gate.lua", "test_empty_commit_correction_off.lua", "test_correction_levels.lua", "test_key_correction_gap.lua"):
         source = (ROOT / "tools" / name).read_text(encoding="utf-8")
         # Run the shared suite in the public mirror layout, without copying
         # unrelated TigerClaw tools or any live configuration/model files.
@@ -171,6 +171,17 @@ def negative_controls(lua, root):
         print(json.dumps({"negative_control": name, "status": "detected"}), flush=True)
     # Helper-module mutants run in this owned copy only and are always restored.
     helpers = [
+        ("correction-d89-default", "tiger_sentence_correction.lua", "test_key_correction_gap.lua",
+         'A={seeds=8,one=16,two=8,steps=4096,delta_one=8,delta_two=9}',
+         'A={seeds=8,one=16,two=8,steps=4096}',
+         "default D89 thresholds missing"),
+        ("correction-gap-cutoff", "tiger_sentence_correction.lua", "test_key_correction_gap.lua",
+         'if items[i].score < cutoff then break end',
+         'if false then break end', "wrong independent budget cutoffs"),
+        ("correction-gap-optional", "tiger_sentence_correction.lua", "test_key_correction_gap.lua",
+         'local delta = profile.delta_one\n        if budget == 2 then delta = profile.delta_two end',
+         'local delta = budget == 1 and profile.delta_one or profile.delta_two',
+         "nil single gap inherited double cutoff"),
         ("correction-strength-cost", "tiger_sentence_correction.lua", "test_correction_levels.lua",
          'M.level_penalties = {weak=8, medium=6, strong=4}',
          'M.level_penalties = {weak=4, medium=6, strong=8}',
@@ -215,7 +226,7 @@ def main():
     lua = str(Path(lua).resolve())
     with temporary_tree() as root:
         isolated_sources(root)
-        for script in ("test_tiger_sentence_incremental.lua", "test_rime_contract.lua", "test_sentence_safety.lua", "test_sentence_learning.lua", "test_review_regressions.lua", "test_ngram_reader.lua", "test_memory.lua", "test_lexical_prior.lua", "test_allocation.lua", "test_key_correction_reuse.lua", "test_early_evidence_gate.lua", "test_empty_commit_correction_off.lua", "test_correction_levels.lua"):
+        for script in ("test_tiger_sentence_incremental.lua", "test_rime_contract.lua", "test_sentence_safety.lua", "test_sentence_learning.lua", "test_review_regressions.lua", "test_ngram_reader.lua", "test_memory.lua", "test_lexical_prior.lua", "test_allocation.lua", "test_key_correction_reuse.lua", "test_early_evidence_gate.lua", "test_empty_commit_correction_off.lua", "test_correction_levels.lua", "test_key_correction_gap.lua"):
             result = execute(lua, root, script)
             print(result.stdout, end="", flush=True)
             result.check_returncode()
