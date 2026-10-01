@@ -116,7 +116,7 @@ int main(int argc, char** argv) {
         }
         if (argc == 5 && std::string(argv[4]) == "correction") {
             const std::string corrected = u8"\u5373\u4fbf\u5982\u6b64"; // 即便如此
-            const std::string comment = u8"\u7ea0\u9519"; // 纠错
+            const std::string comment = u8"\U0001F41E"; // Single-codepoint ladybug annotation.
             const std::string comma = u8"\uff0c";
             reset(false);
             check(!api->get_option(session,"tiger_sentence_key_correction"),"correction must default off");

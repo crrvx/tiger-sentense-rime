@@ -49,6 +49,28 @@ end
 -- Each budget is pruned separately. Its constant search offset never changes
 -- with calibration, preserving even floating-point tie-breaking of survivors.
 M.option = "tiger_sentence_key_correction"
+-- User strength changes final per-error cost only. Beam/search cost stays fixed.
+M.level = "off"
+M.level_penalties = {weak=8, medium=6, strong=4}
+M.level_options = {
+    tiger_sentence_correction_off="off",
+    tiger_sentence_correction_weak="weak",
+    tiger_sentence_correction_medium="medium",
+    tiger_sentence_correction_strong="strong"
+}
+function M.option_for_level(level)
+    for option, value in pairs(M.level_options) do if value==level then return option end end
+    error("unknown correction level: " .. tostring(level))
+end
+function M.context_level(context)
+    local level, count = nil, 0
+    for option, value in pairs(M.level_options) do
+        if context:get_option(option) then level=value; count=count+1 end
+    end
+    if count==1 then return level end
+    -- Older schemas/test hosts expose only the legacy Boolean flag.
+    return context:get_option(M.option) and "medium" or "off"
+end
 function M.has_two_han(text)
     local count = 0
     for ch in text:gmatch("[%z\1-\127\194-\244][\128-\191]*") do
@@ -137,7 +159,21 @@ function M.current(bucket, exact, position)
         table.sort(items, better)
         local limit=budget==1 and profile.one or profile.two
         if position>24 then limit=profile.long or math.max(1,math.floor(limit/2)) end
-        for i = 1, math.min(#items, limit) do result[#result + 1] = items[i] end
+        local delta = budget == 1 and profile.delta_one or profile.delta_two
+        local cutoff = items[1] and delta and (items[1].score - delta) or -math.huge
+        local kept = 0
+        for i = 1, math.min(#items, limit) do
+            if items[i].score < cutoff then break end
+            result[#result + 1] = items[i]
+            kept = kept + 1
+        end
+        if M.gap_stats then
+            local stats = M.gap_stats
+            stats.calls = stats.calls + 1
+            stats.seen = stats.seen + #items
+            stats[budget] = stats[budget] + kept
+            stats.pruned = stats.pruned + math.min(#items, limit) - kept
+        end
     end
     -- Exact states are borrowed, never changed or removed by correction pruning.
     for i=1,math.min(#(exact or {}),profile.seeds) do result[#result+1]=exact[i] end

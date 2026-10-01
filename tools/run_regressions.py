@@ -39,7 +39,7 @@ def temporary_tree():
 def isolated_sources(destination):
     shutil.copytree(PACK / "lua", destination / "lua")
     (destination / "tools").mkdir()
-    for name in ("test_tiger_sentence_incremental.lua", "test_rime_contract.lua", "test_sentence_safety.lua", "test_sentence_learning.lua", "test_review_regressions.lua", "test_ngram_reader.lua", "test_memory.lua", "test_lexical_prior.lua", "test_allocation.lua", "test_key_correction_reuse.lua"):
+    for name in ("test_tiger_sentence_incremental.lua", "test_rime_contract.lua", "test_sentence_safety.lua", "test_sentence_learning.lua", "test_review_regressions.lua", "test_ngram_reader.lua", "test_memory.lua", "test_lexical_prior.lua", "test_allocation.lua", "test_key_correction_reuse.lua", "test_early_evidence_gate.lua", "test_empty_commit_correction_off.lua", "test_correction_levels.lua"):
         source = (ROOT / "tools" / name).read_text(encoding="utf-8")
         # Run the shared suite in the public mirror layout, without copying
         # unrelated TigerClaw tools or any live configuration/model files.
@@ -119,6 +119,22 @@ def negative_controls(lua, root):
          "behavior-bearing snapshot mutation was ignored"),
     ]
     variants.extend([
+        ("correction-empty-code-disabled", "test_empty_commit_correction_off.lua",
+         'if correction.enabled or not context:get_option("tiger_sentence_early_commit") or state.suspended then',
+         'if not context:get_option("tiger_sentence_early_commit") or state.suspended then',
+         "correction enabled allowed empty-code commit"),
+        ("correction-empty-code-stale", "test_empty_commit_correction_off.lua",
+         'if correction.enabled or not context:get_option("tiger_sentence_early_commit") or state.suspended then\n        state.empty_code_pending = nil',
+         'if correction.enabled or not context:get_option("tiger_sentence_early_commit") or state.suspended then\n        -- negative control: retained stale proposal',
+         "disabled empty-code retained stale proposal"),
+        ("evidence-before-correction-gate", "test_early_evidence_gate.lua",
+         'local current = decode(full_raw, false, state.committed_text, active_lock(state))',
+         'local current = decode(full_raw, true, state.committed_text, active_lock(state))',
+         "blocked correction built early evidence"),
+        ("evidence-incomplete-gate", "test_early_evidence_gate.lua",
+         '        if current.correction_incomplete or\n            (current[1]',
+         '        if false or\n            (current[1]',
+         "incomplete correction built early evidence"),
         ("correction-prefix-view", "test_key_correction_reuse.lua",
          '        "\\tv3:" .. correction.profile',
          '        "\\t" .. (required or "") .. "\\tv3:" .. correction.profile',
@@ -155,6 +171,10 @@ def negative_controls(lua, root):
         print(json.dumps({"negative_control": name, "status": "detected"}), flush=True)
     # Helper-module mutants run in this owned copy only and are always restored.
     helpers = [
+        ("correction-strength-cost", "tiger_sentence_correction.lua", "test_correction_levels.lua",
+         'M.level_penalties = {weak=8, medium=6, strong=4}',
+         'M.level_penalties = {weak=4, medium=6, strong=8}',
+         "wrong level penalty"),
         ("memory-learning-cap", "tiger_sentence_learning.lua", "test_memory.lua",
          'local MATERIALIZED_CODE_LIMIT = 256', 'local MATERIALIZED_CODE_LIMIT = 10000',
          "materialized learning cache is unbounded"),
@@ -195,7 +215,7 @@ def main():
     lua = str(Path(lua).resolve())
     with temporary_tree() as root:
         isolated_sources(root)
-        for script in ("test_tiger_sentence_incremental.lua", "test_rime_contract.lua", "test_sentence_safety.lua", "test_sentence_learning.lua", "test_review_regressions.lua", "test_ngram_reader.lua", "test_memory.lua", "test_lexical_prior.lua", "test_allocation.lua", "test_key_correction_reuse.lua"):
+        for script in ("test_tiger_sentence_incremental.lua", "test_rime_contract.lua", "test_sentence_safety.lua", "test_sentence_learning.lua", "test_review_regressions.lua", "test_ngram_reader.lua", "test_memory.lua", "test_lexical_prior.lua", "test_allocation.lua", "test_key_correction_reuse.lua", "test_early_evidence_gate.lua", "test_empty_commit_correction_off.lua", "test_correction_levels.lua"):
             result = execute(lua, root, script)
             print(result.stdout, end="", flush=True)
             result.check_returncode()
