@@ -39,7 +39,7 @@ def temporary_tree():
 def isolated_sources(destination):
     shutil.copytree(PACK / "lua", destination / "lua")
     (destination / "tools").mkdir()
-    for name in ("test_tiger_sentence_incremental.lua", "test_rime_contract.lua", "test_sentence_safety.lua", "test_sentence_learning.lua", "test_review_regressions.lua", "test_ngram_reader.lua", "test_memory.lua", "test_lexical_prior.lua", "test_allocation.lua"):
+    for name in ("test_tiger_sentence_incremental.lua", "test_rime_contract.lua", "test_sentence_safety.lua", "test_sentence_learning.lua", "test_review_regressions.lua", "test_ngram_reader.lua", "test_memory.lua", "test_lexical_prior.lua", "test_allocation.lua", "test_key_correction_reuse.lua"):
         source = (ROOT / "tools" / name).read_text(encoding="utf-8")
         # Run the shared suite in the public mirror layout, without copying
         # unrelated TigerClaw tools or any live configuration/model files.
@@ -119,6 +119,13 @@ def negative_controls(lua, root):
          "behavior-bearing snapshot mutation was ignored"),
     ]
     variants.extend([
+        ("correction-prefix-view", "test_key_correction_reuse.lua",
+         '        "\\tv3:" .. correction.profile',
+         '        "\\t" .. (required or "") .. "\\tv3:" .. correction.profile',
+         "required prefix launched a second search"),
+        ("correction-incomplete-prefix", "test_key_correction_reuse.lua",
+         'safe = math.min(safe, cache.complete_through or floor)',
+         'safe = common', "reused an incomplete bucket"),
         ("tail-backspace-reset", "test_backspace.lua",
          'if not reuse_tail then reset_decode_cache() end', 'reset_decode_cache()',
          "Tail Backspace rebuilt the locked lattice"),
@@ -188,7 +195,7 @@ def main():
     lua = str(Path(lua).resolve())
     with temporary_tree() as root:
         isolated_sources(root)
-        for script in ("test_tiger_sentence_incremental.lua", "test_rime_contract.lua", "test_sentence_safety.lua", "test_sentence_learning.lua", "test_review_regressions.lua", "test_ngram_reader.lua", "test_memory.lua", "test_lexical_prior.lua", "test_allocation.lua"):
+        for script in ("test_tiger_sentence_incremental.lua", "test_rime_contract.lua", "test_sentence_safety.lua", "test_sentence_learning.lua", "test_review_regressions.lua", "test_ngram_reader.lua", "test_memory.lua", "test_lexical_prior.lua", "test_allocation.lua", "test_key_correction_reuse.lua"):
             result = execute(lua, root, script)
             print(result.stdout, end="", flush=True)
             result.check_returncode()

@@ -11,7 +11,7 @@ M.profiles = {
 M.profile = "A"
 M.epoch = 0
 M.diagnostics_enabled = false
-M.stats = {searches=0,cache_hits=0,one_steps=0,two_steps=0,exhaustions=0,expansions=0,seconds=0}
+M.stats = {searches=0,cache_hits=0,one_steps=0,two_steps=0,exhaustions=0,expansions=0,seconds=0,prefix_reuses=0}
 function M.configure(name)
     assert(M.profiles[name], "unknown correction profile")
     M.profile=name; M.cache={}; M.epoch=M.epoch+1
@@ -26,7 +26,13 @@ end
 function M.reserve(edits,characters,work)
     work=work or M.searching
     if not work then return true end
-    if work.used[edits]+characters>work.limit then work.exhausted=true; return false end
+    if work.used[edits]+characters>work.limit then
+        work.exhausted=true
+        if work.position and not work.first_incomplete_position then
+            work.first_incomplete_position=work.position
+        end
+        return false
+    end
     work.used[edits]=work.used[edits]+characters
     if M.diagnostics_enabled then
         local name=edits==1 and "one_steps" or "two_steps"

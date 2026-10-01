@@ -1210,7 +1210,17 @@ local function isolation_penalty(text)
         end
     end
     local old_key = isolation_cache_keys[isolation_cache_next]
-    if old_key then isolation_cache[old_key] = nil end
+    if old_key then
+        -- Evict a batch to keep hash insertion headroom after a rehash.
+        for i = 0, math.ceil(ISOLATION_CACHE_ENTRIES / 4) - 1 do
+            local slot = (isolation_cache_next + i - 1) % ISOLATION_CACHE_ENTRIES + 1
+            local victim = isolation_cache_keys[slot]
+            if victim then
+                isolation_cache[victim] = nil
+                isolation_cache_keys[slot] = nil
+            end
+        end
+    end
     isolation_cache[text] = penalty
     isolation_cache_keys[isolation_cache_next] = text
     isolation_cache_next = isolation_cache_next % ISOLATION_CACHE_ENTRIES + 1
@@ -1740,6 +1750,7 @@ local function expand_range(raw, states, from_pos, length, minimum_consumed_end)
     local code_reward_per_key = ensure_kn() and ranking_prior.canonical_code_reward or 0.0
     local protect_primary_rare = ranking_prior.canonical_isolation_factor < 1.0
     for position = from_pos, length - 1 do
+        if correction.searching then correction.searching.position = position end
         local current = correction.searching and
             correction.current(states[position], correction.searching.exact[position], position) or
             dedup_limit(states[position], beam_limit_at(position))
@@ -2742,23 +2753,89 @@ function correction.rank_candidates(candidates, penalty)
     return ranked
 end
 
+-- The lattice is independent of the required display prefix. Keep only the
+-- latest filtered/reranked view, and memoize terminal evaluations in this one
+-- generation. Prefix refreshes share its EOS quota; they never start a search.
+function correction.publish(cache, exact, locked, required)
+    required = required or ""
+    if cache.required ~= required or not cache.candidates then
+        local candidates = {}
+        for _, path in ipairs(cache.terminal) do
+            local tail = path.text:sub(#(locked and locked.text or "") + 1)
+            if correction.has_two_han(tail) and path.text:sub(1, #required) == required then
+                local item = cache.evaluated[path]
+                if item == nil then
+                    item = false
+                    if correction.reserve(path.correction_count, 1, cache.work) then
+                        item = evaluate_state(path)
+                        item.correction_count = path.correction_count
+                        item.correction_base_score = item.score + correction.search_penalty * path.correction_count
+                        item.corrected_raw = correction.corrected_raw(cache.raw, path)
+                        item._raw = cache.raw
+                        setmetatable(item, candidate_display_meta)
+                    end
+                    cache.evaluated[path] = item
+                end
+                if item then candidates[#candidates + 1] = item end
+            end
+        end
+        cache.required, cache.unranked = required, candidates
+        cache.candidates = correction.rank_candidates(candidates, correction.penalty)
+    end
+    cache.exact, cache.incomplete = exact, cache.work.exhausted
+    if correction.diagnostics_enabled and cache.incomplete and not cache.exhaustion_counted then
+        correction.stats.exhaustions = correction.stats.exhaustions + 1
+        cache.exhaustion_counted = true
+    end
+    correction.last_work = {one=cache.work.used[1], two=cache.work.used[2],
+        limit=cache.work.limit, incomplete=cache.incomplete, from=cache.from,
+        reused_through=cache.reused_through, complete_through=cache.complete_through}
+    return correction.result(exact, cache.candidates, candidate_limit, cache.incomplete)
+end
+
 function correction.finish(raw, exact, exact_states, locked, required, full)
     local floor = locked and #locked.raw or 0
     local suffix = raw:sub(floor + 1)
     local _, letters = suffix:gsub("[a-z]", "")
     if not correction.enabled or letters < 4 or not exact_states or not ensure_kn() then return exact end
     local identity = (locked and (locked.raw .. "\t" .. locked.text .. "\t" .. locked.boundaries) or "") ..
-        "\t" .. (required or "") .. "\tv2:" .. correction.profile .. ":" .. correction.penalty .. ":" .. correction.margin
+        "\tv3:" .. correction.profile .. ":" .. correction.penalty .. ":" .. correction.margin ..
+        ":" .. correction.search_penalty .. ":" .. correction.epoch .. ":" .. model_generation
     local cache = full and {} or correction.cache
     local states, from = nil, floor
     if cache.identity == identity and cache.raw == raw then
         if correction.diagnostics_enabled then correction.stats.cache_hits=correction.stats.cache_hits+1 end
-        return correction.result(exact, cache.candidates, candidate_limit, cache.incomplete)
+        return correction.publish(cache, exact, locked, required)
     end
     local minimum_end=-1
-    if not cache.incomplete and cache.identity == identity and cache.raw and #cache.raw > lexicon_state.max_code_len and
+    local reused_through
+    if cache.identity == identity and cache.raw and #cache.raw > lexicon_state.max_code_len and
         #raw > lexicon_state.max_code_len and cache.raw:sub(1, floor) == raw:sub(1, floor) then
-        if #raw > #cache.raw and raw:sub(1, #cache.raw) == cache.raw then
+        if cache.incomplete then
+            -- Never reuse a truncated bucket. All incoming edges at/before
+            -- the first denied source position were completed. Keep only that
+            -- prefix and replay every edge crossing its boundary. Selectors
+            -- remain on the conservative rebuild path.
+            if raw:match("^[a-z]+$") and cache.raw:match("^[a-z]+$") then
+                local common = floor
+                while common < math.min(#raw, #cache.raw) and
+                    raw:byte(common + 1) == cache.raw:byte(common + 1) do common = common + 1 end
+                local safe = common
+                if common < math.min(#raw, #cache.raw) then
+                    safe = math.max(floor, common - lexicon_state.max_code_len)
+                end
+                safe = math.min(safe, cache.complete_through or floor)
+                if safe > floor then
+                    states = {}
+                    for i=0,#raw do states[i]=i<=safe and cache.states[i] or new_bucket() end
+                    minimum_end, reused_through = safe, safe
+                    from = math.max(floor, safe + 1 - lexicon_state.max_code_len)
+                    if correction.diagnostics_enabled then
+                        correction.stats.prefix_reuses = correction.stats.prefix_reuses + 1
+                    end
+                end
+            end
+        elseif #raw > #cache.raw and raw:sub(1, #cache.raw) == cache.raw then
             states = cache.states
             from = math.max(floor, #cache.raw + 1 - lexicon_state.max_code_len - trailing_selector_span(raw))
             for i = #cache.raw + 1, #raw do states[i] = new_bucket() end
@@ -2788,31 +2865,18 @@ function correction.finish(raw, exact, exact_states, locked, required, full)
     local started=correction.diagnostics_enabled and os.clock()
     local ok, failure = pcall(expand_range, raw, states, from, #raw, minimum_end)
     correction.searching = nil
+    work.position = nil
     if not ok then correction.cache = {}; error(failure, 0) end
-    local candidates = {}
-    for _, path in ipairs(correction.current(states[#raw], nil, #raw)) do
-        local tail = path.text:sub(#(locked and locked.text or "") + 1)
-        if correction.has_two_han(tail) and (required == nil or path.text:sub(1, #required) == required)
-            and correction.reserve(path.correction_count, 1, work) then
-            -- Terminal EOS scoring shares the same generation's quota.
-            local item = evaluate_state(path)
-            item.correction_count = path.correction_count
-            item.correction_base_score = item.score + correction.search_penalty * path.correction_count
-            item.corrected_raw = correction.corrected_raw(raw, path)
-            item._raw = raw
-            setmetatable(item, candidate_display_meta)
-            candidates[#candidates + 1] = item
-        end
-    end
-    local ranked = correction.rank_candidates(candidates, correction.penalty)
+    cache = {raw=raw, identity=identity, states=states, work=work,
+        terminal=correction.current(states[#raw], nil, #raw), evaluated={},
+        from=from, reused_through=reused_through,
+        complete_through=math.max(minimum_end, work.first_incomplete_position or #raw)}
+    local result = correction.publish(cache, exact, locked, required)
     if correction.diagnostics_enabled then
         correction.stats.seconds=correction.stats.seconds+os.clock()-started
-        if work.exhausted then correction.stats.exhaustions=correction.stats.exhaustions+1 end
     end
-    correction.last_work={one=work.used[1],two=work.used[2],limit=work.limit,incomplete=work.exhausted}
-    if not full then correction.cache = {raw=raw, identity=identity, states=states,
-        candidates=ranked, unranked=candidates, exact=exact,incomplete=work.exhausted} end
-    return correction.result(exact, ranked, candidate_limit,work.exhausted)
+    if not full then correction.cache = cache end
+    return result
 end
 
 do
