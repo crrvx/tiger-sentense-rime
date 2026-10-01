@@ -1,52 +1,57 @@
-# TCSKNM03 五阶分页模型
+# TCSKNM03 Q8 五阶模型
 
-TCSKNM03 是虎整句 Rime 的纯 Lua 字符五阶模型格式。它用于直接 Beam 搜索，不是三阶候选后的重排层，也不需要 KenLM DLL/SO。
+默认模型从 2026-09-25 起为 `corpus4-articles-nonnews-50-25-25-mainline-budget-q8`。
+虎爪和 Rime 使用同一份文件；Rime 用纯 Lua 分页读取，不需要原生 DLL。
 
-## 设计目标
+- 文件：`sentence-fivegram-mobile.bin`
+- 大小：405,663,171 字节（405.66 MB）
+- SHA256：`756f6c92cf43ad6e8e3087ce66b711ac6ad0fc41e6f3fb82b3766e35ecab8681`
+- 各阶记录数：20,799 / 7,959,327 / 69,562,625 / 10,273,459 / 8,415,769。
 
-- 保存完整 1–5 gram backoff 语义，Beam 路径携带最近四个 token。
-- 单文件同时提供 observed-bigram 查询，不再为了孤立字先验常驻旧三阶模型。
-- 使用 uint16 词 ID；概率与回退权重使用 16-bit 线性量化。
-- header 中的量化参数使用整数定点表示，reader 不依赖 string.pack/unpack，兼容 Lua 5.3+ 和 LuaJIT 5.1。
-- 2–5 gram 按 context 分块，每 64 个 context 一个稀疏索引点；运行时只读取命中的磁盘页并使用有界缓存。
+## 数据与量化
 
-## 模型语义
+Corpus4 wsmerge 50% / Articles 25% / Brightmart 非新闻 25%，原始 ARPA 条件概率
+融合后物化；按历史概率加权的单条删除 KL 排名，保护前缀并重算回退。二至五阶
+记录数精确匹配旧主线预算，一阶保留20,799项联合词表。经过保留全部记录的
+Q16 转换后量化为 Q8；不再使用旧模型的前128字上下文裁剪规则。
 
-正式模型从 Brightmart 纯汉字五阶 ARPA 构建。与虎爪压缩五阶采用相同的 context-vocabulary=128 剪枝规则：
-
-- 1–3 gram 全保留；
-- 4/5 gram 只保留历史全部属于 unigram 概率前 128 字（另含特殊符号）的 context；
-- 被删除完整分布的 backoff 视为 1，即 log10 backoff 为 0；
-- 保留 context 对后缀封闭。
-
-查询从最长可用 history 开始；目标 n-gram 缺失时累加当前 context 的 backoff，再逐级回退，直到 unigram。BOS 进入 history，EOS 正常参与最终评分。
+概率码 `round(q16/257)`，共256档；回退码0精确表示log10权重0，其余使用
+`1+round((q16-1)*254/65534)`。不能将量化码0当成缺失记录。
+它与 KenLM 的 Q8 算法不同，不宣称逐分等价。
 
 ## 文件布局
 
-固定 256-byte header 后是四个 256 项 bucket directory、词表和 2/3/4/5-gram block/index 区。
+magic 为 TCSKNM03，header 256字节，四个256项 bucket directory，词表和2–5阶
+context block/index区。每64个上下文一个稀疏索引点。上下文字ID、后继字ID和
+后继计数为uint16。Q8为version 2，概率/回退各uint8，header step使用1e-9单位；
+min使用1e-7单位。读取器也支持同格式version 1/Q16（step单位1e-12）。
 
-每个 context block 保存：
+查询从最长历史逐级回退。BOS进入历史，EOS参与评分；同一个文件提供观察二元组
+先验。上下文不存在时回退权重为0；上下文存在但无后继时仍保留其回退权重。
 
-1. order-1 个 uint16 context token ID；
-2. 一个量化 backoff；
-3. successor 数；
-4. 按 token ID 排序的 (successor_id, probability)。
+## 构建
 
-bucket 由 context 第一个 token ID 的低 8 bit 选择。每个 bucket 的稀疏索引记录每 64 个 block 的 context 和文件偏移，Lua reader 只加载对应索引和局部 block page。
+本模型的融合、剪枝和保留全部记录的 Q16 转换在离线流水线完成；不能对其再套用
+旧构建器的上下文剪枝默认值。Q16 到 Q8 使用 `tools/requantize_tcs_q8.cpp`：
 
-## 构建与自检
+```sh
+g++ -std=c++20 -O3 tools/requantize_tcs_q8.cpp -o requantize_tcs_q8
+./requantize_tcs_q8 q16.bin sentence-fivegram-mobile.bin
+```
 
-    g++ -std=c++20 -O3 -DNDEBUG tools/build_tcs_knm03.cpp -o build_tcs_knm03
-    ./build_tcs_knm03 input.arpa sentence-fivegram-mobile.bin temp-dir
-    python3 tools/test_tcs_knm03.py --lua lua
-    python3 tools/test_tcs_knm03.py --lua luajit
+转换器检查所有区块、记录计数和索引位置。正式打包需核对默认模型 SHA256。
 
-生产构建必须核对各阶保留记录数、模型 SHA256，并用冻结 20k 形码集与 KenLM 压缩五阶做首选及逐句差异检查。
+## 验证与迁移
 
-## 2026-09-22 生产模型与验证
+以下为旧主线模型的格式迁移历史验证，不是新模型准确率：
+Q8与Q16在当时Rime历史20k上的首选逐句一致：旧集9959、新集9971，合计19930。
+另两组冻结解码测试：新闻30000句救回2句、无退步；articles33129句救回3句、
+退步1句。语料间和训练语料存在重合，结果不等于独立泛化提升。
+模型/回归/分页缓存、增量/回删/锁前缀均需通过；实际前端输入验收单独进行。
 
-默认生产模型：`sentence-fivegram-mobile.bin`，460,693,519 字节（439.35 MiB），SHA256 `4e6d79b957a55edf35cd9e2e66c62bd0bbe598581b7dc088b462122a713172a7`。转换器从同一份 17 GB 字符五阶 ARPA 流式生成，保留计数逐阶为 21,230 / 7,959,327 / 69,562,625 / 10,273,459 / 8,415,769，与虎爪 compact-fivegram 的剪枝清单完全一致。
+主线已删除 TCSKNM01/02 三阶读取入口。只搜索用户目录models/、用户目录根部、
+共享目录models/下的五阶文件。缺失/损坏时使用已有无模型行为。升级必须同时更新
+Lua模块和Q8模型；保留自己的码表、配置及学习数据。大模型不提交Git。
 
-冻结 20k 形码集在关闭学习、LLM 与提前上屏的条件下，TCSKNM03 直接 Beam 搜索命中：旧集 9,959 / 10,000，新集 9,971 / 10,000，合计 19,930 / 20,000（99.650%）。虎爪当前 419,929,926 字节 KenLM Q8 compact-fivegram 为 19,926；TCSKNM03 与其只有 5 个首选差异，净多命中 4 句。与此前完整五阶直接搜索的总命中同为 19,930，但逐句并不等价，20k 中有 27 个首选差异，因此不得描述为数值或逐句复刻 KenLM。
-
-Lua 5.4 与 LuaJIT 5.1 均通过 TCSKNM03 fixture、真实模型增量/回删/锁定/提前上屏专项和无模型负控制回归。生产模型分页读取时 8 路并行评测单进程常驻内存约 60 MiB；这只是该次离线进程观测，不作为所有前端的内存承诺。实际 Weasel/fcitx-rime/ibus-rime 前端仍需实机验收。
+新模型冻结实验：旧集9945/10000、Articles32913/33129、THUC29964/30000，
+相对旧主线合计多对99句。冻结解码器与当前主线先验不同，不等同于当前前端准确率。

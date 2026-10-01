@@ -43,15 +43,18 @@ def isolated_sources(destination):
         source = (ROOT / "tools" / name).read_text(encoding="utf-8")
         # Run the shared suite in the public mirror layout, without copying
         # unrelated TigerClaw tools or any live configuration/model files.
+        source = source.replace("", "")
         (destination / "tools" / name).write_text(source, encoding="utf-8")
     shutil.copy2(ROOT / "tools/model_fixture.lua", destination / "tools/model_fixture.lua")
+    shutil.copy2(ROOT / "tools/test_key_correction.lua", destination / "tools/test_key_correction.lua")
     for pattern in ("*.txt", "*.yaml", "rime.lua"):
         for path in PACK.glob(pattern):
             shutil.copy2(path, destination / path.name)
-    shutil.copy2(ROOT / "tiger_sentence.lexical.bin",
-                 destination / "tiger_sentence.lexical.bin")
-    shutil.copy2(ROOT / "tools/test_high_freq_limit.lua", destination / "tools/test_high_freq_limit.lua")
-    shutil.copy2(ROOT / "tools/test_backspace.lua", destination / "tools/test_backspace.lua")
+    (destination / "models").mkdir()
+    shutil.copy2(PACK / "models/tiger_sentence.lexical.bin",
+                 destination / "models/tiger_sentence.lexical.bin")
+    (destination / "tools/test_high_freq_limit.lua").write_text((ROOT / "tools/test_high_freq_limit.lua").read_text().replace("", ""))
+    (destination / "tools/test_backspace.lua").write_text((ROOT / "tools/test_backspace.lua").read_text().replace("", ""))
 
 
 def execute(lua, root, script, override=None):
@@ -151,8 +154,9 @@ def negative_controls(lua, root):
         ("learning-window", "tiger_sentence_learning.lua", "test_review_regressions.lua",
          'for i = lo, math.min(#codes, lo + 63) do', 'for i = lo, math.min(#codes, lo + 64) do',
          "equal code no longer consumes the 64-slot window"),
-        ("observed-zero", "tiger_sentence_ngram.lua", "test_ngram_reader.lua",
-         'return columns[1][cached], columns[2][cached], columns[3][cached]', 'return columns[1][cached], columns[2][cached], columns[2][cached] ~= 0',
+        ("observed-zero", "tiger_sentence_fivegram.lua", "test_ngram_reader.lua",
+         'local _,_,observed=lookup(2,history,1,right)\n            return observed',
+         'local p,_,observed=lookup(2,history,1,right)\n            return observed and p ~= header.quant[2].pmin',
          "zero-valued observed record was confused with missing"),
     ]
     for name, module, script, before, after, expected in helpers:
@@ -193,6 +197,11 @@ def main():
         result.check_returncode()
         result = execute(lua, root, "test_backspace.lua")
         print(result.stdout, end="", flush=True)
+        result.check_returncode()
+        result = subprocess.run([lua, str(root / "tools/test_key_correction.lua"), str(root), str(root)],
+                                text=True, capture_output=True, timeout=120)
+        print(result.stdout, end="", flush=True)
+        if result.returncode: print(result.stderr, end="")
         result.check_returncode()
         if args.negative_control:
             negative_controls(lua, root)

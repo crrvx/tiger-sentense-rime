@@ -35,12 +35,24 @@ for _,a in ipairs(tokens)do for _,b in ipairs(tokens)do
     check(model.logp("甲",a,b)==oracle.logp("甲",a,b),"evicted pair returned a stale probability")
 end end
 local stats=model.cache_status()
-check(stats.bigram_entries<=8192 and stats.bigram_limit==8192,"pair cache exceeded capacity")
-check(stats.bigram_hits>0 and stats.bigram_misses>0,"fixture did not exercise both pair cache paths")
+check(stats.step_entries<=stats.step_limit and stats.context_entries<=stats.context_limit,"score cache exceeded capacity")
+model.set_diagnostics(true)
+local before=model.logp("甲","甲","的")
+model.logp("甲","甲","的")
+check(model.diagnostics().step_hits>0,"step cache never hit")
+model.configure_cache({context_entries=1,logp_entries=1,index_pages=1,page_bytes=1024*1024})
+for _,a in ipairs(tokens)do for _,b in ipairs(tokens)do
+    check(model.logp("甲",a,b)==oracle.logp("甲",a,b),"small-cache eviction changed probability")
+end end
+check(model.logp("甲","甲","的")==before,"cache configuration changed float addition")
+model.trim_caches()
+check(model.cache_status().step_entries==0 and model.cache_status().context_entries==0,"trim retained score caches")
+check(stats.page_bytes<=stats.page_limit,"page cache exceeded capacity")
+check(stats.page_entries>0,"fixture did not load pages")
 model.close()
 -- A newly loaded model has new caches, not cached probabilities from a prior file.
 model=reader.load(path)
-check(model.cache_status().bigram_entries==0,"reader instances shared a probability cache")
+check(model.cache_status().page_entries==0,"reader instances shared a probability cache")
 check(model.logp("甲","甲","的")==oracle.logp("甲","甲","的"),"reload changed probability")
 model.close()
 -- Reuse a closed handle's *path*, not its cache, after corrupting the header.

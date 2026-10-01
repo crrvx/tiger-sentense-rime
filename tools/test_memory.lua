@@ -41,7 +41,7 @@ for _,duplicate in ipairs({false,true}) do
     local status=sentence.trim_memory()
     check(actual==sentence.decode(prefix,true,''),'trim discarded active generation')
     check(status.profile=='compact' and status.logp_entries==0,'trim changed profile or retained score cache')
-    if status.model then check(status.model.page_bytes==0 and status.model.index_cache_bytes==0,'trim retained model pages') end
+    if status.model then check(status.model.page_bytes==0 and status.model.page_entries==0,'trim retained model pages') end
    end
   end
   check(sentence.results_equal(expected,sentence.decode(raw,true,'')),'memory profile changed output')
@@ -69,7 +69,7 @@ if string.pack and utf8 then
  local reference=make(path,100)
  local reader=require('tiger_sentence_ngram').new({page_misses=0,page_bytes=0})
  local model=reader.load(path,{page_bytes=128*1024,context_entries=8,bigram_entries=16,index_pages=1})
- check(model.source_index_bytes>4096,'fixture missed index page boundary')
+ check(model.format=='TCSKNM03','Q8 fixture not loaded')
  local tokens=reference.tokens
  for pass=1,3 do
   for i=1,#tokens do
@@ -83,10 +83,10 @@ if string.pack and utf8 then
   end
  end
  local status=model.cache_status()
- check(status.index_misses>2 and status.index_cache_bytes<=8192,'index cache did not evict at its bound')
- check(status.bigram_entries<=16 and status.context_entries<=16,'model record cache exceeded bound')
+ check(status.page_bytes<=status.page_limit,'page cache exceeded bound')
+ check(status.index_cache_limit==1,'index cache limit was ignored')
  model.configure_cache({page_bytes=2*1024*1024,context_entries=4096,bigram_entries=2048,index_pages=16})
- check(model.cache_limit_bytes==2*1024*1024,'model cache limit diagnostic is stale')
+ check(model.cache_status().page_limit==2*1024*1024,'model cache limit diagnostic is stale')
  model.close();os.remove(path)
 else
  print('SKIP paged model memory fixture: binary APIs unavailable')

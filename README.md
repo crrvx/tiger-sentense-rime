@@ -11,10 +11,10 @@
 
 - 字母连续输入整句编码，空格上屏；变长编码 lattice + Beam 解码。
 - 明文码表/字频/白名单（txt），可直接编辑或导入其它形码码表。
-- 可选 Kneser-Ney n-gram 语言模型（默认 TCSKNM03 五阶分页格式，纯 Lua 直接读取；兼容旧 TCSKNM02 三阶）；
+- 可选 Kneser-Ney n-gram 语言模型（默认 TCSKNM03 五阶分页格式，纯 Lua 直接读取）；
   无模型时自动降级为「码表名次 → 更少码表边 → 分数」排序。
 - 形码证据与约 146.5 KiB 的紧凑词先验只重排现有候选，不扩 Beam、
-  不进入自动上屏置信度，也不扩大 214 MiB 语言模型。
+  不进入自动上屏置信度，也不扩大 405.66 MB 语言模型。
 - 概率型自动提前上屏与空码自动上屏；可选择先暂存在编码区，最后一次性提交。
 - 允许单字重码组句（可开关）：分段路径中的非首选单字按语言模型分数竞争。
 - 标点由 `symbols.yaml` 直通上屏；数字后的句号自动输出半角小数点 `.`。
@@ -24,7 +24,7 @@
 1. 复制本方案全部文件到 Rime 用户目录（Windows 默认
    `%APPDATA%\Rime\`）：`tiger_sentence.schema.yaml`、`lua/`、三个
    `tiger_sentence.*.txt`、`tiger_sentence.supplement.txt`、
-   `tiger_sentence.lexical.bin`、`symbols.yaml`，
+   `models/tiger_sentence.lexical.bin`、`symbols.yaml`，
    以及内部配置 `tiger_sentence_ascii.schema.yaml`（不加入 schema_list）。
 2. 在已有的 `rime.lua` 中合并注册（若没有则直接复制本包的 `rime.lua`）：
 
@@ -39,8 +39,36 @@
 3. 在已有的 `default.custom.yaml` 的 schema_list 中加入 `tiger_sentence`
    （本包附带示例）。
 4. （可选）把 `sentence-fivegram-mobile.bin` 放入用户目录 `models/`，
-   见下节。旧 `sentence-ngram-mobile.bin` 仍可作为兼容回退。
+   见下节。词汇辅助文件也必须放在 `models/`，避免被部署清理移走。
 5. 「重新部署」，然后切换到 虎整句。
+
+## 手机同排邻键纠错（实验功能，默认关闭）
+
+在方案菜单打开“按键纠错开”，或者让手机前端切换 Rime 选项
+`tiger_sentence_key_correction`。选择会保存在现有独立选项文件中，跨会话恢复。
+首次默认关闭；不要给这个 switch 添加 `reset`，否则会覆盖用户选择。
+
+按标准 QWERTY 的 `qwertyuiop`、`asdfghjkl`、`zxcvbnm` 三排处理，只尝试
+左右紧邻替换，例如 `w → q/e`。不处理跨排、增删键、颠倒顺序、数字或标点。
+每段尚未确认的编码最多改两处，至少输入四个字母、纠错后至少两个汉字才展示。
+原编码即使已有候选也会尝试纠错；保留精确候选的内部顺序，对纠错路径逐键扣分，
+只有超过精确候选的评分余量才提升位置。标注“纠错”的结果可以成为首选。
+性能测试版同时尝试一处和两处误按，但限制纠错搜索宽度和每次输入的评分次数。
+最多展示两个纠错候选，且只保留与最佳候选评分接近的结果，不再铺满低分纠错句子。
+
+原始编码和光标位置不会被重写，退格仍删除实际按下的键。显式选重的码段与已确认
+前缀不会被重新纠正。组合中切换开关立即刷新未确认候选，不撤销已确认的文字。
+纠错首选不会自动提前上屏，需要空格、点选、标点或现有 Tab 手动选定流程确认。
+搜索完成时，精确首选仍保留原有提前上屏行为。纠错计算达到上限时，该次输入
+暂停自动提前上屏和空码上屏，保留完整候选供手动确认；不会因此关闭语言模型。
+已经上屏的前文不能再由后续纠错撤回。
+希望整段都等待确认时，可同时关闭“提前上屏”。
+含纠错路径的提交不写入自学习，避免把误按编码保存成长期偏好。
+
+需要当前五阶模型；模型缺失或读取失败时退回原有无模型输入。请整体更新 `lua/`
+和 schema，新增 `tiger_sentence_correction.lua` 不能遗漏。本功能仍为实验版：
+当前性能包使用暂定搜索档位，完整准确率评测仍暂停；小米 13 Ultra 上的连续输入
+流畅性仍需实测。长句中间编辑需要较多计算，Linux 测试不等于手机验收。
 
 ## 纠正学习与兼容性
 
@@ -58,7 +86,7 @@
 宿主提交通知不能证明目标应用实际插入文字。
 
 更新时请整体替换本方案的 `lua/` 模块，包括 `tiger_sentence.lua`、
-`tiger_sentence_learning.lua`、`tiger_sentence_ngram.lua`、
+`tiger_sentence_correction.lua`、`tiger_sentence_learning.lua`、`tiger_sentence_ngram.lua`、
 `tiger_sentence_cache.lua` 和 `tiger_sentence_lexical.lua`，
 并同时更新主 schema、内部 ASCII schema，以及上面的四个 Lua 注册项。
 合并现有配置，保留自己的码表和学习数据库。
@@ -76,19 +104,14 @@ BOS/EOS 都参与评分；同一文件同时提供孤立字先验需要的 obser
 不再需要为了这一先验额外常驻旧三阶模型。格式、构建与分页缓存见
 [`docs/TCSKNM03.md`](docs/TCSKNM03.md)。
 
-2026-09-22 默认模型 `brightmart-char5-context128-tcs3-q16` 为 460,693,519 字节
-（439.35 MiB），SHA256：
-`4e6d79b957a55edf35cd9e2e66c62bd0bbe598581b7dc088b462122a713172a7`。
-它与虎爪 419,929,926 字节压缩五阶使用相同的 context-vocabulary=128 剪枝规则；
-1–3 阶全保留，4–5 阶只保留高频历史分布。各阶保留记录数为
-21,230 / 7,959,327 / 69,562,625 / 10,273,459 / 8,415,769。
-冻结 20k 形码集首选为旧集 99.59%、新集 99.71%，合计 99.650%（19,930/20,000）；
-与虎爪当前 420 MB KenLM Q8 压缩版相比净多命中 4 句。两种量化并非逐分/逐句等价，
-详细差异与验收口径见 `docs/TCSKNM03.md`。
+当前默认模型为三源融合 TCSKNM03 Q8 五阶，405,663,171 字节（405.66 MB）。
+Corpus4 50% / Articles 25% / Brightmart 非新闻 25%，按历史加权 KL 剪枝。
+SHA256：`756f6c92cf43ad6e8e3087ce66b711ac6ad0fc41e6f3fb82b3766e35ecab8681`。
+模型身份以 `default-model.json` 为准；更新源码不会自动更新公开 Release 附件。
+请使用配套实验包或核对下载文件的哈希，不要把旧 Release 模型当作新版默认模型。
 
-查找顺序优先 TCSKNM03：用户目录 `models/` → 用户目录根部 → 共享目录 `models/`；
-若不存在则继续查找旧 `sentence-ngram-mobile.bin`（TCSKNM02）和旧格式模型，
-因此只更新源码但不更新模型时仍可使用原三阶行为。默认模型身份见 `default-model.json`。
+查找顺序：用户目录 `models/` → 用户目录根部 → 共享目录 `models/`。
+仅加载 `sentence-fivegram-mobile.bin`，不再回退到旧三阶文件。
 
 没有模型时方案完全可用：解码按码表名次优先，整码单字不会被多段拼接
 压过；语言模型排序、紧凑排序先验与提前上屏的置信度计算一并禁用。
@@ -102,7 +125,7 @@ BOS/EOS 都参与评分；同一文件同时提供孤立字先验需要的 obser
 | `tiger_sentence.codes.txt` | 每行 `字\t编码`，`#` 注释，兼容 CRLF/BOM | 码表；同码内行序即名次，编码仅小写字母（自动小写化） |
 | `tiger_sentence.char_ranks.txt` | 每行一个字，行序=频序 | 常用字最优码过滤与生僻字孤立惩罚；缺失时两者禁用 |
 | `tiger_sentence.full_code_whitelist.txt` | 白名单字符，每行一个或连排 | 白名单字保留完整编码参与组句 |
-| `tiger_sentence.lexical.bin` | TCSLEX01 Bloom filter，150,032 字节 | 5 万个 2～4 字高频词的有界 Top-5 排序票；缺失时自动禁用 |
+| `models/tiger_sentence.lexical.bin` | TCSLEX01 Bloom filter，150,032 字节 | 5 万个 2～4 字高频词的有界 Top-5 排序票；缺失时自动禁用 |
 
 - schema 配置 `tiger_sentence/high_freq_limit`（默认 `1500`）：常用字
   （字频前 N）只保留最优码；`0` 全部放开；负数按 `0`。
@@ -186,13 +209,13 @@ lua tools/bench_rime_learning.lua lua 10
 回车提交暂存文字和剩余编码；Esc、取消和切换方案取消暂存。
 学习等待最终宿主提交。中途关闭选项不会丢失已暂存文字。
 
-“提前上屏”“单字重码组句”“提前上屏至编码”记住最后选择，跨应用和重启后恢复；
+“提前上屏”“单字重码组句”“提前上屏至编码”“按键纠错”记住最后选择，跨应用和重启后恢复；
 已打开的其他会话在下一次输入前同步。菜单和手机 API 切换均适用。
 偏好保存在用户目录 `tiger_sentence.options.yaml`，更新时保留，本仓库不分发个人偏好。
 已有 `user.yaml` 中保存的这三个值可作为首次迁移来源。
-首次默认值为开、开、关，配置在 `tiger_sentence/option_defaults/` 下，保存值优先。
-这三个 switch 不应配置 `reset`，否则新会话会强制恢复默认；升级时同时更新 Lua
-和主 schema，并移除旧自定义补丁中针对这三个开关的 `reset`。
+首次默认值为开、开、关、关，配置在 `tiger_sentence/option_defaults/` 下，保存值优先。
+这四个 switch 不应配置 `reset`，否则新会话会强制恢复默认；升级时同时更新 Lua
+和主 schema，并移除旧自定义补丁中针对这些开关的 `reset`。
 
 锁定前缀使用增量缓存；学习只更新受影响的编码分区，墙钟时间不会触发学习重算。
 码表初始化、置信度对象分配、暂存显示和模型页缓存也做了优化。
@@ -200,7 +223,7 @@ lua tools/bench_rime_learning.lua lua 10
 ## 来源与许可
 
 本方案是 TigerClaw（虎爪）输入法整句行为的独立 Rime 移植。
-`tiger_sentence.lexical.bin` 派生自 rime-mohu 词库；来源、版本、转换与许可见
+`models/tiger_sentence.lexical.bin` 派生自 rime-mohu 词库；来源、版本、转换与许可见
 [词先验署名](docs/LEXICAL_PRIOR_ATTRIBUTION.md)和
 [机器可读清单](docs/LEXICAL_PRIOR_MANIFEST.json)。
 许可证见 [LICENSE](LICENSE)（GPL-3.0）。
