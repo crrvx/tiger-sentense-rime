@@ -3249,9 +3249,20 @@ function correction.set_enabled(enabled)
     if enabled ~= correction.enabled then correction.enabled = enabled; reset_decode_cache() end
 end
 
+function correction.set_level(level)
+    assert(level == "off" or correction.level_penalties[level], "unknown correction level")
+    local enabled = level ~= "off"
+    local penalty = correction.level_penalties[level] or correction.level_penalties.medium
+    correction.level = level
+    if correction.enabled ~= enabled or correction.penalty ~= penalty then
+        correction.enabled, correction.penalty = enabled, penalty
+        reset_decode_cache()
+    end
+end
+
 function correction.sync(context)
     if context and type(context.get_option) == "function" then
-        correction.set_enabled(context:get_option(correction.option))
+        correction.set_level(correction.context_level(context))
     end
 end
 
@@ -3410,23 +3421,13 @@ local function is_modifier_repr(repr)
         repr == "Mode_switch"
 end
 
-function correction.before_append(env,state,raw)
-    if not correction.enabled or not env.engine.context:get_option("tiger_sentence_early_commit") then return nil end
-    local decoded=decode(raw,false,state.committed_text,active_lock(state))
-    local blocked=decoded.correction_incomplete or
-        (decoded[1] and (decoded[1].correction_count or 0)>0)
-    local pending
-    if not blocked then
-        pending=state.empty_code_pending or capture_empty_code_candidate(raw,state.committed_text,active_lock(state))
-    end
-    return {raw=raw,epoch=correction.epoch,blocked=blocked,pending=pending}
-end
-
-local function try_empty_code_commit(env, state, full_before, appended_letter, before)
+local function try_empty_code_commit(env, state, full_before, appended_letter)
     local context = env.engine.context
-    -- Empty-code auto commit is part of 整句自动提前上屏; there is no
-    -- separate switch, so the early-commit option gates it as well.
-    if not context:get_option("tiger_sentence_early_commit") or state.suspended then
+    -- With key correction enabled, an exact-code dead end may be a typo.
+    -- Never commit it or even evaluate the empty-code proposal: a later key
+    -- can still expose the intended correction. Probabilistic early commit
+    -- and explicit selections have separate, unchanged paths.
+    if correction.enabled or not context:get_option("tiger_sentence_early_commit") or state.suspended then
         state.empty_code_pending = nil
         save_transient_state(context, state, env)
         return false
@@ -3436,26 +3437,8 @@ local function try_empty_code_commit(env, state, full_before, appended_letter, b
         return false
     end
     local generation = model_generation
-    local pending
-    if correction.enabled then
-        -- push_input may synchronously translate the new raw. Never rewind the
-        -- lattice to the previous raw to rediscover already captured evidence.
-        if not before or before.raw~=full_before or before.epoch~=correction.epoch or before.blocked then
-            state.empty_code_pending = nil
-            save_transient_state(context, state, env)
-            return false
-        end
-        pending=before.pending
-        local current=decode(state.committed_raw..live_input(context),false,state.committed_text,active_lock(state))
-        if current.correction_incomplete or (current[1] and (current[1].correction_count or 0)>0) then
-            state.empty_code_pending=nil
-            save_transient_state(context,state,env)
-            return false
-        end
-    else
-        pending=state.empty_code_pending or
-            capture_empty_code_candidate(full_before,state.committed_text,active_lock(state))
-    end
+    local pending = state.empty_code_pending or
+        capture_empty_code_candidate(full_before, state.committed_text, active_lock(state))
     if generation ~= model_generation then
         synchronize_model_state(state)
         save_transient_state(context, state, env)
@@ -3621,6 +3604,25 @@ local function try_early_commit(env)
     end
 
     local generation = model_generation
+    if correction.enabled then
+        -- A corrected top or exhausted search cannot authorize early commit.
+        -- Inspect this generation's ordinary result before building evidence
+        -- that would immediately be discarded. The following evidence upgrade
+        -- reuses its exact lattice and correction quota; it does not re-search.
+        local current = decode(full_raw, false, state.committed_text, active_lock(state))
+        if current.correction_incomplete or
+            (current[1] and (current[1].correction_count or 0) > 0) then
+            reset_early_evidence(state)
+            state.empty_code_pending = nil
+            save_transient_state(context, state, env)
+            return
+        end
+        if generation ~= model_generation then
+            synchronize_model_state(state)
+            save_transient_state(context, state, env)
+            return
+        end
+    end
     local decoded = decode(full_raw, true, state.committed_text, active_lock(state))
     if decoded.correction_incomplete or (decoded[1] and (decoded[1].correction_count or 0) > 0) then
         reset_early_evidence(state)
@@ -4075,9 +4077,8 @@ local function processor(key_event, env)
             state.empty_code_pending = nil
             save_transient_state(context, state, env)
         end
-        local before=is_letter and correction.before_append(env,state,full_before) or nil
         context:push_input(ch)
-        if is_letter and try_empty_code_commit(env, state, full_before, ch, before) then
+        if is_letter and try_empty_code_commit(env, state, full_before, ch) then
             return 1
         end
         try_early_commit(env)
@@ -4290,7 +4291,7 @@ local function translator(input, seg, env)
             end
             if text ~= "" or buffered ~= "" then
                 local cand = Candidate(buffered ~= "" and "sentence_buffered" or "sentence",
-                    seg.start, seg._end, text, (item.correction_count or 0) > 0 and "纠错" or "")
+                    seg.start, seg._end, text, (item.correction_count or 0) > 0 and "🐞" or "")
                 if buffered ~= "" then cand.quality = 1000 end
                 cand.preedit = buffered .. (buffered ~= "" and preedit ~= "" and " " or "") .. preedit
                 yield(cand)
@@ -4532,8 +4533,8 @@ M.processor_component = {
 -- separate small Rime Config so API/mobile toggles persist too (switcher's
 -- save_options only saves switcher commands). Never rewrite user.yaml or the
 -- user's default.custom.yaml. Disk I/O occurs on load/toggle, never each key.
-M.options = {}
-do
+M.options = {};
+(function()
     local defaults = {
         tiger_sentence_early_commit = true,
         tiger_sentence_allow_duplicate_single = true,
@@ -4541,6 +4542,13 @@ do
         tiger_sentence_key_correction = false
     }
     local stores = {}
+    local level_path = "options/tiger_sentence_correction_level"
+    local function valid_level(level)
+        return level == "off" or correction.level_penalties[level] ~= nil
+    end
+    local function read_string(config, key)
+        if type(config.get_string) == "function" then return config:get_string(key) end
+    end
     local function open_store()
         if type(Config) ~= "function" or not rime_api or
             type(rime_api.get_user_data_dir) ~= "function" then return nil end
@@ -4558,8 +4566,44 @@ do
             if value == nil then value = legacy:get_bool("var/option/" .. name) end
             store.values[name] = value
         end
+        local level = read_string(config, level_path)
+        if not valid_level(level) then
+            local count = 0
+            for option, choice in pairs(correction.level_options) do
+                if legacy:get_bool("var/option/" .. option) then level=choice; count=count+1 end
+            end
+            if count ~= 1 then level=nil end
+        end
+        if not valid_level(level) then
+            local old = store.values[correction.option]
+            level = old ~= nil and (old and "medium" or "off") or nil
+        end
+        store.level = level
+        if level then store.values[correction.option] = level ~= "off" end
         stores[path] = store
         return store
+    end
+    local function apply_level(context, level)
+        -- Set the selected member first. Rime may synchronously translate
+        -- between notifications, so keep an enabled state throughout changes.
+        local selected = correction.option_for_level(level)
+        if not context:get_option(selected) then context:set_option(selected, true) end
+        for option in pairs(correction.level_options) do
+            if option ~= selected and context:get_option(option) then context:set_option(option, false) end
+        end
+        local enabled = level ~= "off"
+        if context:get_option(correction.option) ~= enabled then context:set_option(correction.option, enabled) end
+        correction.set_level(level)
+        set_property_if_changed(context, "tiger_sentence_correction_level", level)
+    end
+    local function save_store(store, context)
+        local saved, accepted = pcall(function()
+            for option, choice in pairs(store.values) do store.config:set_bool("options/" .. option, choice) end
+            if store.level then store.config:set_string(level_path, store.level) end
+            return store.config:save_to_file(store.path)
+        end)
+        set_property_if_changed(context, "tiger_sentence_options_error",
+            saved and accepted and "" or "Unable to save tiger_sentence.options.yaml")
     end
     function M.options.sync(env)
         local live = env._tiger_options
@@ -4567,10 +4611,13 @@ do
         live.syncing = true
         local context = env.engine.context
         for name, fallback in pairs(live.defaults) do
-            local value = live.store.values[name]
-            if value == nil then value = fallback end
-            if context:get_option(name) ~= value then context:set_option(name, value) end
+            if name ~= correction.option then
+                local value = live.store.values[name]
+                if value == nil then value = fallback end
+                if context:get_option(name) ~= value then context:set_option(name, value) end
+            end
         end
+        apply_level(context, live.store.level or live.default_level)
         live.revision = live.store.revision
         live.syncing = false
     end
@@ -4586,21 +4633,37 @@ do
             if value == nil then value = fallback end
             live.defaults[name] = value
         end
+        local level = read_string(env.engine.schema.config, "tiger_sentence/option_defaults/tiger_sentence_correction_level")
+        live.default_level = valid_level(level) and level or (live.defaults[correction.option] and "medium" or "off")
         M.options.sync(env)
         live.connection = context.option_update_notifier:connect(function(ctx, name)
-            if live.syncing or defaults[name] == nil then return end
-            local value = ctx:get_option(name)
-            if store.values[name] == value then return end
-            store.values[name] = value
+            if live.syncing then return end
+            local choice = correction.level_options[name]
+            if choice then
+                -- Radio groups may deselect before selecting. Persist only
+                -- the positive selection, never an intermediate empty group.
+                if not ctx:get_option(name) then return end
+            elseif name == correction.option then
+                -- Keep old frontend toggle buttons working as off/medium.
+                choice = ctx:get_option(name) and "medium" or "off"
+            elseif defaults[name] == nil then return end
+            if choice then
+                local changed = store.level ~= choice or store.values[correction.option] ~= (choice ~= "off")
+                live.syncing = true
+                apply_level(ctx, choice)
+                live.syncing = false
+                if not changed then return end
+                store.level = choice
+                store.values[correction.option] = choice ~= "off"
+            else
+                local value = ctx:get_option(name)
+                if store.values[name] == value then return end
+                store.values[name] = value
+            end
             store.revision = store.revision + 1
-            -- Leave this session's revision stale: other options may have
-            -- changed in another application since this one was last used.
-            local saved, accepted = pcall(function()
-                for option, choice in pairs(store.values) do store.config:set_bool("options/" .. option, choice) end
-                return store.config:save_to_file(store.path)
-            end)
-            set_property_if_changed(ctx, "tiger_sentence_options_error",
-                saved and accepted and "" or "Unable to save tiger_sentence.options.yaml")
+            -- Keep this session stale so later synchronization merges changes
+            -- from other applications without overwriting unrelated choices.
+            save_store(store, ctx)
         end)
     end
     function M.options.fini(env)
@@ -4608,7 +4671,7 @@ do
         if live and live.connection then live.connection:disconnect() end
         env._tiger_options = nil
     end
-end
+end)()
 -- Retain Rime's native modifier timing and bindings. Only while a buffered
 -- composition exists, raw-code/inline-ASCII exits must submit its displayed
 -- candidate instead of the private transport marker. The schema is private;

@@ -37,7 +37,7 @@ cmake --build "$root/build" --target rime rime-lua --parallel 2
 export LD_LIBRARY_PATH="$root/build/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 plugin="$root/build/lib/rime-plugins/librime-lua.so"
 test -f "$plugin"
-for name in api preedit options; do
+for name in api preedit options correction_levels; do
   g++ -std=c++17 -O2 "tools/rime_${name}_probe.cpp" -I"$root/src/src" \
     -L"$root/build/lib" -Wl,-rpath,"$root/build/lib" -lrime -ldl -o "$root/rime-$name-probe"
 done
@@ -45,3 +45,5 @@ python3 tools/rime_integration_test.py --exe "$root/rime-api-probe" --plugin "$p
 python3 tools/test_rime_preedit_integration.py --exe "$root/rime-preedit-probe" --plugin "$plugin"
 python3 tools/test_rime_options_integration.py --exe "$root/rime-options-probe" --plugin "$plugin"
 python3 tools/test_rime_options_integration.py --exe "$root/rime-options-probe" --plugin "$plugin" --negative-control
+
+python3 tools/test_rime_correction_levels_integration.py --exe "$root/rime-correction_levels-probe" --plugin "$plugin"
