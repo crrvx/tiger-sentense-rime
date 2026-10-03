@@ -408,6 +408,30 @@ function M.diff(raw, before, selected, floor, mode)
     return result
 end
 
+function M.seed_initial_levels(index, events, score_gap)
+    if not events or #events == 0 then return events end
+    local fresh = {}
+    for _, e in ipairs(events) do
+        if not index or M.score(index, e.mode, e.code, e.text, e.context) <= 0 then
+            fresh[#fresh + 1] = e
+        end
+    end
+    if #fresh == 0 then return events end
+    local required = math.max(0, score_gap or 0) + 1
+    local level = 1
+    while level < 3 and #fresh * exact_score(level) < required do level = level + 1 end
+    if level == 1 then return events end
+    for _, e in ipairs(fresh) do
+        for _ = 2, level do
+            events[#events + 1] = {
+                time=e.time, mode=e.mode, code=e.code, text=e.text, context=e.context,
+                raw_start=e.raw_start, raw_end=e.raw_end, text_start=e.text_start, text_end=e.text_end
+            }
+        end
+    end
+    return events
+end
+
 function M.reinforce_existing(index, raw, before, selected, floor, mode)
     if not index or not index.codes or #index.codes == 0 or not before or not selected or
         before.text == selected.text or mode == "" then return {} end

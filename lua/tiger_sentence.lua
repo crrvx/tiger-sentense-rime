@@ -3816,6 +3816,8 @@ local function learning_stage(env, state, selected, raw, submitted_first)
             end
             if not duplicate then events[#events + 1] = e end
         end
+        learning.seed_initial_levels(live.store and live.store.index, events,
+            (baseline.score or 0) - (selected.score or 0))
         for _, e in ipairs(events) do if #live.pending < 256 then live.pending[#live.pending + 1] = e end end
     end
     live.baseline = nil
