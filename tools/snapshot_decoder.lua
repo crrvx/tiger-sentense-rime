@@ -16,7 +16,7 @@ if arg[7]=="legacy-ranking" and sentence.set_decoder_parameters_for_test then
 end
 sentence.ensure_lexicon(nil);sentence.set_model_enabled(mode~="none")
 local model=sentence.model_status()
-assert(mode=="none" or (model.loaded and model.format=="TCSKNM02"),"required paged model was not loaded")
+assert(mode=="none" or (model.loaded and model.format=="TCSKNM03"),"required fivegram model was not loaded")
 local function canonical(value)
     local kind=type(value)
     if kind=="nil" then return "nil" end
