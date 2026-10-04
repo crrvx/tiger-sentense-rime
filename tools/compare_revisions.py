@@ -71,8 +71,8 @@ def main():
             subprocess.run([lua, str(generator), str(ROOT / "tools/model_fixture.lua"), str(model)], check=True, timeout=30)
         if model:
             with model.open("rb") as stream:
-                if stream.read(8) != b"TCSKNM02":
-                    parser.error("Only an explicit TCSKNM02 model is accepted")
+                if stream.read(8) != b"TCSKNM03":
+                    parser.error("Only a TCSKNM03 fivegram model is accepted")
         outputs, stats = [], []
         for label, tree in (("baseline", baseline), ("candidate", candidate)):
             data = work / label
@@ -82,7 +82,7 @@ def main():
                     shutil.copy2(source, data / source.name)
             if model:
                 (data / "models").mkdir()
-                destination = data / "models/sentence-ngram-mobile.bin"
+                destination = data / "models/sentence-fivegram-mobile.bin"
                 try:
                     destination.symlink_to(model)
                 except OSError:
