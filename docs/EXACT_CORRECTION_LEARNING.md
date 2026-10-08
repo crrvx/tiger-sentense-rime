@@ -1,6 +1,8 @@
 # 正码超过纠错候选的显式偏好
 
-r3 新增独立的最终菜单偏好。真实模型、强档、原始输入 ujkf 初始菜单中“轮滑”“热滑”来自改码，“拾滑”“捡”来自正码。明确点击“捡”，或用 Tab 选中后成功提交一次，下一次相同输入可由“捡”首选；退出并重开后保留。已有 r2 的“捡 > 拾滑”记录也保留，只需补充前面两个纠错输出的比较。
+正码可以通过明确改选并成功提交，建立超过纠错候选的独立最终菜单偏好；退出并重开后保留。现有 fusion-v1 的正码内部跨来源偏好继续生效。
+
+2026-10-09 的新评分已让默认模型下 ujkf 的“捡”直接首选。学习回归在隔离目录内通过测试参数恢复原先“轮滑／热滑／拾滑在捡前面”的分差，验证点击、Tab、重复通知和重开时的学习行为；正式包默认使用新评分。
 
 ## 记录与应用边界
 
@@ -26,4 +28,4 @@ C++ 与 Lua 沿用各自历史哈希算法，本功能语义一致，不承诺�
     python3 tools/test_rime_learning_integration.py --exe /tmp/rime-learning-probe --plugin /usr/lib64/rime-plugins/librime-lua.so --model models/sentence-fivegram-mobile.bin --case fusion --correction strong --selection tap
     python3 tools/test_rime_learning_integration.py --exe /tmp/rime-learning-probe --plugin /usr/lib64/rime-plugins/librime-lua.so --model models/sentence-fivegram-mobile.bin --case fusion --correction strong --selection tab
 
-按本机 librime Lua 插件位置调整 --plugin。Lua 测试覆盖四档点击/Tab、重复通知、取消、错提交、纠错来源/历史拒绝、关学习再开、不同原码隔离、r2 升级及重载；CAPI 探针覆盖真实菜单索引、提交、持久化和引擎重启。
+按本机 librime Lua 插件位置调整 --plugin。Lua 测试覆盖四档点击/Tab、重复通知、取消、错提交、纠错来源/历史拒绝、关学习再开、不同原码隔离、已有 fusion 偏好补充纠错偏好及重载；CAPI 探针覆盖真实菜单索引、提交、持久化和引擎重启。

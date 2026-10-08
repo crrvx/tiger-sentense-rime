@@ -442,6 +442,13 @@ os.time=real_time
 -- Optional production-model matrix, sharing the processor/notifier adapter above.
 -- Usage: lua test_sentence_learning.lua <source root> <data root with models/>.
 if arg[2] then
+    -- New production scores already put 捡 first. Preserve a genuinely lower
+    -- exact candidate in this learning-only fixture using the evaluation hook.
+    local function learning_fixture_scores()
+        sentence.set_decoder_parameters_for_test({canonical_code_reward=2,
+            whole_input_single_character_reward=0})
+    end
+    learning_fixture_scores()
     sentence.set_model_enabled(true)
     for _, level in ipairs({"off", "weak", "medium", "strong"}) do
         for _, action in ipairs({"tap", "tab"}) do
@@ -559,6 +566,7 @@ if arg[2] then
             sentence=dofile(override or repo.."/lua/tiger_sentence.lua")
             learning=sentence.learning
             learning.storage_factory=fake_storage
+            learning_fixture_scores()
             sentence.set_model_enabled(true);sentence.ensure_lexicon(nil)
             e,c,p,_,submitted,cfg=host(name,false,level)
             menu=input()
@@ -618,6 +626,7 @@ if arg[2] then
         package.loaded["tiger_sentence_learning"]=nil
         sentence=dofile(override or repo.."/lua/tiger_sentence.lua");learning=sentence.learning
             learning.storage_factory=fake_storage
+        learning_fixture_scores()
         sentence.set_model_enabled(true);sentence.ensure_lexicon(nil)
         e,c,p=host(name,false,"strong")
         menu=input()

@@ -60,8 +60,8 @@ check(status.loaded and status.entries == 50000 and status.bytes == 150032,
 check(status.path == repo .. "/models/tiger_sentence.lexical.bin",
     "decoder did not prefer the deployment-safe models directory")
 local parameters = sentence.decoder_parameters()
-check(parameters.canonical_code_reward == 2.0,
-    "production canonical-code prior changed")
+check(parameters.canonical_code_reward == 0.0,
+    "production canonical-code reward must remain disabled")
 check(parameters.lexical_prior_weight == 0.1,
     "production lexical-prior weight changed")
 check(parameters.canonical_isolation_factor == 0.0 and

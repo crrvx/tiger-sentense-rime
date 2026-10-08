@@ -39,7 +39,7 @@ def temporary_tree():
 def isolated_sources(destination):
     shutil.copytree(PACK / "lua", destination / "lua")
     (destination / "tools").mkdir()
-    for name in ("test_tiger_sentence_incremental.lua", "test_rime_contract.lua", "test_sentence_safety.lua", "test_sentence_learning.lua", "test_adaptive_learning.lua", "test_review_regressions.lua", "test_ngram_reader.lua", "test_memory.lua", "test_lexical_prior.lua", "test_allocation.lua", "test_key_correction_reuse.lua", "test_early_evidence_gate.lua", "test_empty_commit_correction_off.lua", "test_correction_levels.lua", "test_key_correction_gap.lua"):
+    for name in ("test_tiger_sentence_incremental.lua", "test_rime_contract.lua", "test_sentence_safety.lua", "test_sentence_learning.lua", "test_adaptive_learning.lua", "test_review_regressions.lua", "test_ngram_reader.lua", "test_memory.lua", "test_lexical_prior.lua", "test_whole_single_reward.lua", "test_allocation.lua", "test_key_correction_reuse.lua", "test_early_evidence_gate.lua", "test_empty_commit_correction_off.lua", "test_correction_levels.lua", "test_key_correction_gap.lua"):
         source = (ROOT / "tools" / name).read_text(encoding="utf-8")
         # Run the shared suite in the public mirror layout, without copying
         # unrelated TigerClaw tools or any live configuration/model files.
@@ -71,6 +71,15 @@ def execute(lua, root, script, override=None):
 def negative_controls(lua, root):
     source = (root / "lua/tiger_sentence.lua").read_text(encoding="utf-8")
     variants = [
+        ("primary-reward-disabled", "test_whole_single_reward.lua",
+         '    canonical_code_reward = 0.0,', '    canonical_code_reward = 2.0,',
+         "primary-code reward must be disabled in production"),
+        ("unrestricted-whole-reward", "test_whole_single_reward.lua",
+         'candidate.whole_single_reward_eligible and', 'candidate.optimal_single and',
+         "whole score delta ujkf N=0"),
+        ("whole-reward-confidence", "test_whole_single_reward.lua",
+         'whole_input_single_character_reward_added,\n', '0.0,\n',
+         "whole reward leaked into confidence"),
         ("partial-ranking-work", "test_allocation.lua",
          'local function evaluate_evidence_state(item)\n',
          'local function evaluate_evidence_state(item)\n    path_isolation_penalty(item)\n',
@@ -226,7 +235,7 @@ def main():
     lua = str(Path(lua).resolve())
     with temporary_tree() as root:
         isolated_sources(root)
-        for script in ("test_tiger_sentence_incremental.lua", "test_rime_contract.lua", "test_sentence_safety.lua", "test_sentence_learning.lua", "test_adaptive_learning.lua", "test_review_regressions.lua", "test_ngram_reader.lua", "test_memory.lua", "test_lexical_prior.lua", "test_allocation.lua", "test_key_correction_reuse.lua", "test_early_evidence_gate.lua", "test_empty_commit_correction_off.lua", "test_correction_levels.lua", "test_key_correction_gap.lua"):
+        for script in ("test_tiger_sentence_incremental.lua", "test_rime_contract.lua", "test_sentence_safety.lua", "test_sentence_learning.lua", "test_adaptive_learning.lua", "test_review_regressions.lua", "test_ngram_reader.lua", "test_memory.lua", "test_lexical_prior.lua", "test_whole_single_reward.lua", "test_allocation.lua", "test_key_correction_reuse.lua", "test_early_evidence_gate.lua", "test_empty_commit_correction_off.lua", "test_correction_levels.lua", "test_key_correction_gap.lua"):
             result = execute(lua, root, script)
             print(result.stdout, end="", flush=True)
             result.check_returncode()
