@@ -1,31 +1,50 @@
-# 正码超过纠错候选的显式偏好
+# 可复用片段学习与纠错候选竞争
 
-正码可以通过明确改选并成功提交，建立超过纠错候选的独立最终菜单偏好；退出并重开后保留。现有 fusion-v1 的正码内部跨来源偏好继续生效。
+人工改选正码并成功提交后，普通片段学习分直接进入正码解码。分数足够时，正码可以超过纠错候选；相同片段还可以用于不同前缀的句子。此行为不再依赖两个完整候选之间的硬排序记录。
 
-2026-10-09 的新评分已让默认模型下 ujkf 的“捡”直接首选。学习回归在隔离目录内通过测试参数恢复原先“轮滑／热滑／拾滑在捡前面”的分差，验证点击、Tab、重复通知和重开时的学习行为；正式包默认使用新评分。
+例如，独立选择 `kzjuy → 淦掉` 会确认整个两字片段。以后选择“去淦掉”“他淦掉”等包含该片段的正码候选时，可以继续强化 `kzjuy → 淦掉`，用于此前没有选择过的“没淦掉”。跨前缀能增加多少分、是否达到首选，仍取决于模型分差和已有学习等级。
 
-## 记录与应用边界
+## 提取与确认
 
-- 只由成功提交的无纠错来源、无纠错历史的正码选择触发，Direct、Composed 均适用。
-- 仅记录当时实际显示在该选择前面的纠错候选；取消、提交文字不匹配、重复提交通知、正常接受已学首选均不新增。
-- 新模式为 exact-correction-v1|<现有学习模式>；code 为 ~c 加现有 Lua 哈希，输入字节为 raw\0E\0exact_text\0C\0corrected_text，text 为 E、context 为空。沿用当前主线的 UTF-8 可读学习文件；新偏好仍与普通片段、fusion-v1 记录分开。旧版 LevelDb 学习数据库按主线既有规则不读取、不迁移。
-- 原始输入、模式、正码文本和纠错文本共同隔离偏好。纠错强度和同一输出的纠错路径不进入键，因此切换档位仍有效；换成另一原始输入不受影响。
-- 此记录只用于最终候选归并，不参与正码码表、片段奖励、Beam 搜索或模型分数。现有普通学习与 fusion-v1 记录格式及作用保持。
-- 两条候选链分别保持内部相对顺序。当前纠错项若被后面的正码偏好阻挡，先输出必要的正码前缀；没有偏好时顺序原样。重排在最终菜单条数截断前执行。
-- 真正发生此类重排时标记学习影响并清除本轮自动上屏证据，避免沿用旧首选的成熟判断。
-- 关闭自学习同时停止应用和新增；记录保留，重新启用后恢复。选择纠错项不会创建相反偏好，也不会把纠错文本写成正码词条。
+- 所选候选必须为完整正码路径，不能含纠错来源或已确认前缀的纠错历史。基线可以是纠错候选：它仅用于定位文本差异及共同编码边界；事件编码始终来自实际键入的 raw，文本始终来自所选正码路径。
+- 先验证两条完整路径并提取原有共同边界差异；没有有效差异就不学习。
+- 未锁定前缀、完整选择恰好两个 Unicode 字符时，只确认整个两字片段，不同时生成内部单字事件。
+- 较长输入查找已有普通学习或补充语料支持的片段，最多 16 字、128 码，必须从所选路径的合法边界起止，起点不能早于已确认编码边界，且与至少一个真实变化区间重叠。基线中已经出现同样文本时，不据此推断新的确认。
+- 唯一最长且包含其它匹配的片段替换与其重叠的差异事件，保留不重叠的差异事件；匹配有歧义时回到原始差异，不猜测前缀，也不同时强化整句所有组合。
+- 点选和 Tab 改选均在真实提交后确认。取消、提交内容被转换、重复通知、正常接受已学首选或自动提交均不新增事件。
+- 纯 Direct 码表名次之间的选择不学习。若真实首选与所选候选都是 Direct，但所选候选前存在组句或纠错对手，则以这些跨来源对手中 final 分最高者进行本次比较。
 
-C++ 与 Lua 沿用各自历史哈希算法，本功能语义一致，不承诺跨后端直接互换学习文件。
+## 分数与排序
+
+每次确认按分差增加 1～3 级，累计最多 10 级，无时间衰减。升级数用于排序；一次确认始终只增加一次人工确认计数。
+
+一般上下文的分数为 `4 + 2L`，相同前文的分数为 `7 + 2L`，两者取最大值；等级不足 1 时不加分。普通基线在规划等级时使用“模型及其它基础分 + 预计普通学习分”；纠错基线直接使用它的实际 final 分，不对实际键入编码投影普通奖励。
+
+Direct 完整码候选和 Composed 组句候选均可获得普通分数。Direct 内部仍保持码表名次：存在普通学习分时，剩余 Direct 链的最高分与组句头部比较，必要时先输出其 Direct 前缀。Beam 与最终菜单都在此合并之后裁剪，避免得分提高的低位 Direct 提前挤掉它之前的候选；尚未完成片段的保留槽与裁剪证据标志不变。没有普通学习时，保留原来的排序和快速裁剪路径。
+
+学习分不会写进纠错搜索路径，也不会改变自动上屏的原始概率分母。Direct 学习不增加提前上屏置信奖励；Composed 的已有小幅奖励仍由实际人工确认次数逐步成熟，每次升三级也不等于确认三次。纠错首选、搜索未完成等既有自动上屏门槛继续有效。
+
+## 已有记录
+
+旧 `fusion-v1|...` 与 `exact-correction-v1|...` 记录直接忽略：不进入索引、评分、排序、新确认写入或有效一万条事件窗口。原文件字节、历史编号和撤销语法保留，不迁移、不删除这些行。普通学习记录继续按现有学习模式读取，阈值等设置没有创建额外的整数等级命名空间。
+
+可读文件的 16 MiB 物理大小限制仍适用。旧硬排序行虽然不占有效事件条数，仍保留在文件中。关闭自学习停止应用和新增普通分数；重新启用后恢复有效记录。
 
 ## 回归入口
 
-完整包中包含可运行的生产测试，均在测试自己的临时目录或内存存储适配器执行，不初始化真实用户目录：
+测试只使用自身临时目录或内存存储适配器，不初始化安装中的用户目录：
 
-    lua tools/test_sentence_learning.lua . .
-    luajit tools/test_sentence_learning.lua . .
-    g++ -std=c++17 -O2 tools/rime_learning_probe.cpp -lrime -ldl -o /tmp/rime-learning-probe
-    python3 tools/test_rime_learning_integration.py --exe /tmp/rime-learning-probe --plugin /usr/lib64/rime-plugins/librime-lua.so --model models/sentence-fivegram-mobile.bin
-    python3 tools/test_rime_learning_integration.py --exe /tmp/rime-learning-probe --plugin /usr/lib64/rime-plugins/librime-lua.so --model models/sentence-fivegram-mobile.bin --case fusion --correction strong --selection tap
-    python3 tools/test_rime_learning_integration.py --exe /tmp/rime-learning-probe --plugin /usr/lib64/rime-plugins/librime-lua.so --model models/sentence-fivegram-mobile.bin --case fusion --correction strong --selection tab
+```bash
+lua tools/test_fragment_selection.lua .
+luajit tools/test_fragment_selection.lua .
+python3 tools/run_regressions.py --lua lua --negative-control
+python3 tools/run_regressions.py --lua luajit --negative-control
+lua tools/test_sentence_learning.lua . <含配套码表及models的临时数据目录>
+luajit tools/test_sentence_learning.lua . <含配套码表及models的临时数据目录>
 
-按本机 librime Lua 插件位置调整 --plugin。Lua 测试覆盖四档点击/Tab、重复通知、取消、错提交、纠错来源/历史拒绝、关学习再开、不同原码隔离、已有 fusion 偏好补充纠错偏好及重载；CAPI 探针覆盖真实菜单索引、提交、持久化和引擎重启。
+g++ -std=c++17 -O2 tools/rime_learning_probe.cpp -lrime -ldl -o /tmp/rime-learning-probe
+python3 tools/test_rime_learning_integration.py --exe /tmp/rime-learning-probe --plugin /usr/lib64/rime-plugins/librime-lua.so --model models/sentence-fivegram-mobile.bin --case fusion --correction strong --selection tap
+python3 tools/test_rime_learning_integration.py --exe /tmp/rime-learning-probe --plugin /usr/lib64/rime-plugins/librime-lua.so --model models/sentence-fivegram-mobile.bin --case fusion --correction strong --selection tab
+```
+
+`fusion` 是探针保留的测试用例名，指 `ujkf` 的 Direct/Composed 跨来源竞争；不代表仍使用 `fusion-v1` 记录。该用例在隔离目录内通过测试参数恢复“捡”落后的旧分差，正式代码仍使用当前评分。`淦掉` 跨前缀矩阵使用当前生产评分。自动化测试不能代替手机前端或长期实体输入验收。
