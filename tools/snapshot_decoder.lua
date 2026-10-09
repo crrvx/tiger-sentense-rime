@@ -106,7 +106,7 @@ end
 local learned_modes = ignore_learning_behavior and {false} or {false,true}
 for _,learned in ipairs(learned_modes)do
     for _,duplicate in ipairs({false,true})do
-        sentence.set_allow_duplicate_single({get_option=function()return duplicate end})
+        sentence.apply_auto_select_min_code_length(duplicate and 3 or 0)
         sentence.set_learning_for_test(learned and learning.runtime_index(events,os.time()) or nil,learned and "snapshot" or "")
         local group=tostring(learned).."/"..tostring(duplicate)
         for case,raw in ipairs(samples)do
